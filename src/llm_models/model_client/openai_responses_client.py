@@ -247,6 +247,8 @@ def _convert_tool_options(tool_options: Sequence[ToolOption] | None) -> List[Dic
         tools.append(
             {
                 "type": "function",
+                # Preserve optional tool fields; Responses otherwise normalizes them to required.
+                "strict": False,
                 "name": tool_option.name,
                 "description": tool_option.description,
                 "parameters": tool_option.parameters_schema or {"type": "object", "properties": {}, "required": []},
