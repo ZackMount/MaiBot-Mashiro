@@ -9,7 +9,7 @@ import traceback
 
 from src.chat.replyer.replyer_manager import replyer_manager
 from src.chat.message_receive.message import SessionMessage
-from src.chat.utils.utils import is_bot_self
+from src.chat.utils.utils import get_bot_account, is_bot_self
 from src.cli.maisaka_cli_sender import CLI_PLATFORM_NAME, render_cli_message
 from src.common.data_models.message_component_data_model import TextComponent
 from src.common.data_models.reply_generation_data_models import ReplyGenerationResult, build_reply_monitor_detail
@@ -305,7 +305,7 @@ async def _resolve_reply_quote(
     )
     if frequency == "never" or stream.platform == CLI_PLATFORM_NAME:
         return False, 0.0
-    bot_user_id = str(stream.account_id or "").strip()
+    bot_user_id = get_bot_account(stream.platform, stream.account_id)
     if not bot_user_id:
         raise ValueError("固定引用规则需要明确的 bot 发送账号")
     return decide_quote(
