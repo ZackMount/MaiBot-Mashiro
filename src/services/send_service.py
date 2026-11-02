@@ -479,7 +479,7 @@ def _build_processed_plain_text(message: SessionMessage) -> str:
             continue
 
         if isinstance(component, ReplyComponent):
-            processed_parts.append(component.target_message_content or "[回复消息]")
+            processed_parts.append(component.to_plain_text())
             continue
 
         if isinstance(component, DictComponent):

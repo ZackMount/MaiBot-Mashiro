@@ -11,9 +11,10 @@ from src.common.data_models.message_component_data_model import (
     TextComponent,
 )
 
+from src.common.prompt_i18n import load_prompt
 from src.maisaka.context.message_adapter import format_speaker_content
 from src.maisaka.context.message_id_alias import to_display_message_id
-from .messages import SessionBackedMessage
+from .messages import LLMContextMessage, SessionBackedMessage
 
 
 def build_planner_prefix(
@@ -60,7 +61,7 @@ def build_planner_prefix(
 
     message_attrs.extend(
         [
-            f'time="{escape(timestamp.strftime("%H:%M:%S"), quote=True)}"',
+            f'time="{escape(timestamp.strftime("%Y-%m-%d %H:%M:%S"), quote=True)}"',
             f'user="{escape(user_name, quote=True)}"',
         ]
     )
@@ -196,4 +197,36 @@ def build_session_backed_text_message(
         timestamp=timestamp,
         message_id=message_id,
         source_kind=source_kind,
+    )
+
+
+def build_planner_turn_anchor(
+    message: SessionMessage,
+    round_index: int,
+    history: Sequence[LLMContextMessage] = (),
+) -> str:
+    """把实际触发位置传给规划器，避免把留在窗口中的旧消息误当成本轮新消息。"""
+    user_info = message.message_info.user_info
+    previous = max(
+        (entry for entry in history if isinstance(entry, SessionBackedMessage)
+         and entry.message_id and entry.message_id != message.message_id
+         and entry.source_kind in {"user", "guided_reply"} and entry.timestamp < message.timestamp),
+        key=lambda entry: entry.timestamp,
+        default=None,
+    )
+    previous_context = ""
+    if previous is not None:
+        gap = int((message.timestamp - previous.timestamp).total_seconds())
+        previous_context = (
+            f"previous_message_id={to_display_message_id(previous.message_id)}; "
+            f"previous_time={previous.timestamp.strftime('%Y-%m-%d %H:%M:%S')}; "
+            f"gap_to_trigger={gap // 3600}h {(gap % 3600) // 60}m {gap % 60}s"
+        )
+    return load_prompt(
+        "maisaka_turn_anchor",
+        trigger_message_id=to_display_message_id(message.message_id),
+        trigger_time=message.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+        trigger_sender=user_info.user_cardname or user_info.user_nickname or user_info.user_id,
+        round_number=str(round_index + 1),
+        previous_context=previous_context,
     )

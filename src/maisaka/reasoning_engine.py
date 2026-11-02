@@ -91,7 +91,10 @@ from src.maisaka.monitor.events import (
     emit_planner_snapshot,
 )
 from src.maisaka.memory.person_profile import build_person_profile_injection_messages
-from src.maisaka.context.planner_messages import build_planner_user_prefix_from_session_message
+from src.maisaka.context.planner_messages import (
+    build_planner_turn_anchor,
+    build_planner_user_prefix_from_session_message,
+)
 from src.maisaka.visual.mode_utils import resolve_enable_visual_planner
 
 if TYPE_CHECKING:
@@ -786,7 +789,10 @@ class MaisakaReasoningEngine:
         state.action_tool_count = len(action_tool_definitions)
         response = await self._run_interruptible_planner(
             injected_user_messages=injected_user_messages or None,
-            tail_user_messages=self._runtime.build_focus_tail_user_messages() or None,
+            tail_user_messages=[
+                build_planner_turn_anchor(trigger_message, round_index, self._runtime._chat_history),
+                *self._runtime.build_focus_tail_user_messages(),
+            ],
             tool_definitions=action_tool_definitions,
         )
         state.response = response

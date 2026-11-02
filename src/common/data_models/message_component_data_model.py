@@ -285,6 +285,17 @@ class ReplyComponent(BaseMessageComponentModel):
         self.target_message_sender_cardname: Optional[str] = target_message_sender_cardname
         """目标消息发送者群昵称"""
 
+    def to_plain_text(self) -> str:
+        """把引用来源与正文分开，避免把被引用者的话记到当前发送者名下。"""
+        sender = (
+            self.target_message_sender_cardname
+            or self.target_message_sender_nickname
+            or self.target_message_sender_id
+            or "未知发送者"
+        )
+        content = self.target_message_content or "[原消息内容不可用]"
+        return f"[引用消息 id={self.target_message_id}，发送者={sender}]\n{content}\n[/引用消息]\n"
+
     async def to_seg(self) -> Seg:
         return Seg(type="reply", data=self.target_message_id)
 

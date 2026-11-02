@@ -426,18 +426,17 @@ class SessionMessage(MaiMessage):
         id_content_map: MsgIDMapping,
     ) -> str:
         if component.target_message_content:
-            return component.target_message_content
+            return component.to_plain_text()
         if result_item := id_content_map.mapping.get(component.target_message_id):  # ID映射缓存优先
             content, sender_info = result_item
             if isinstance(content, Task):  # 如果是Task，说明是转发组件传入的占位结果，需要等待其完成
                 content = await content  # 获取最终结果
                 id_content_map.mapping[component.target_message_id] = (content, sender_info)  # 更新为实际内容
             component.target_message_content = content
-            tgt_msg_s_name = sender_info.user_cardname or sender_info.user_nickname or sender_info.user_id
             component.target_message_sender_cardname = sender_info.user_cardname
             component.target_message_sender_nickname = sender_info.user_nickname
             component.target_message_sender_id = sender_info.user_id
-            return f"[回复了{tgt_msg_s_name}的消息: {content}]"
+            return component.to_plain_text()
         else:  # 尝试从数据库根据消息id查找消息内容
             try:
                 with get_db_session() as session:
@@ -447,8 +446,7 @@ class SessionMessage(MaiMessage):
                         component.target_message_sender_cardname = db_msg.user_cardname
                         component.target_message_sender_nickname = db_msg.user_nickname
                         component.target_message_sender_id = db_msg.user_id
-                        tgt_msg_s_name = db_msg.user_cardname or db_msg.user_nickname or db_msg.user_id
-                        return f"[回复了{tgt_msg_s_name}的消息: {db_msg.processed_plain_text}]"
+                        return component.to_plain_text()
             except Exception as e:
                 logger.error(f"查询回复消息时发生错误: {e}")
 

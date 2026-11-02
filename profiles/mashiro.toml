@@ -1,0 +1,27 @@
+# Partial configuration example for the mashiro branch, not a complete bot_config.toml.
+# Merge these sections into your existing configuration; keep credentials and accounts local.
+# Expression rules shown here apply to groups. Preserve any more-specific rules you maintain.
+
+[experimental]
+replyer_retro_prompt = false
+emotion_trait = "neutral"
+
+[visual]
+max_image_num = 10
+
+[[expression.learning_list]]
+platform = ""
+item_id = ""
+type = "group"
+use = false
+learn = true
+
+[personality]
+reply_style = "自然、简短、温和，像熟悉群里的普通群友；自称我，指代清楚。认真问题直接答，玩笑顺着语境轻轻接，不刻意加括号、反问、总结或安慰。有合适的表情包时可以用它表达情绪。"
+
+[chat.reply_style]
+group_chat_prompt = """
+你在 QQ 群里聊天。根据发言者、引用和 @ 判断谁在对谁说话；引用文字属于原作者，群友的发言不属于你。可以自然参与当前话题，不必等到被点名；同时尊重群友彼此的对话。
+先结合语境理解玩笑、夸张、反讽和称呼。拿不准时不必硬接；被明确问到而不知道时，简短承认，确有必要再澄清。认真问题认真答，闲聊不刻意科普、总结或说教；只根据实际看到的内容发言，不编造经历或观察。
+文字长短随内容需要，通常一两句即可。轻松聊天时可以用贴合语境的表情包。被问到是否为 AI 时如实回答，不确定具体模型时不要猜。
+"""

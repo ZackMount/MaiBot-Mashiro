@@ -1,0 +1,6 @@
+[Current turn anchor]
+This turn was triggered or continued by message {trigger_message_id}, sent at {trigger_time} by {trigger_sender}.
+This is internal step {round_number} of the turn. The full message is in chat history; use its current conversation as the active topic. Earlier records have not become newly received messages merely because they remain visible.
+{previous_context}
+When present, gap_to_trigger is the elapsed time between the preceding actual chat message and the triggering message. Speech before a long break is not a new conversational contribution.
+Continue an old topic when this message explicitly resumes or quotes it. Otherwise keep old topics as background, rather than commenting on them because the current message needs no reply. Do not repeat replies already sent.

@@ -44,7 +44,6 @@ from src.llm_models.payload_content.context_item import (
 )
 from src.llm_models.payload_content.context_protocol import ContextProtocolMode
 from src.llm_models.request_snapshot import serialize_context_items_snapshot
-from src.maisaka.context.message_adapter import parse_speaker_content
 from src.maisaka.context.messages import (
     LLMContextMessage,
     ModelOutputContextMessage,
@@ -159,10 +158,8 @@ class BaseMaisakaReplyGenerator(RetroReplyPromptMixin):
         if message.source_kind != "guided_reply":
             return ""
 
-        plain_text = message.processed_plain_text.strip()
-        _, body = parse_speaker_content(plain_text)
-        normalized_body = body.strip()
-        return self._normalize_content(normalized_body) if normalized_body else ""
+        # 使用真实消息片段，保留时间、消息 ID 和引用关系；不读取可能混入引用正文的摘要。
+        return self._build_text_from_message_sequence(message)
 
     def _build_target_message_block(self, reply_message: Optional[SessionMessage]) -> str:
         if reply_message is None:
@@ -209,11 +206,11 @@ class BaseMaisakaReplyGenerator(RetroReplyPromptMixin):
         ]
         if quote_ids:
             target_lines.append(f"- quote={','.join(to_display_message_id(quote_id) for quote_id in quote_ids)}")
-        target_lines.extend(
-            [
-                f"- 发言内容：{target_content}",
-            ]
-        )
+        target_lines.append(f"- 时间：{reply_message.timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
+        for component in reply_message.raw_message.components:
+            if isinstance(component, ReplyComponent) and component.target_message_content:
+                target_lines.append(component.to_plain_text().strip())
+        target_lines.append(f"- 本条发言内容：{target_content}")
         return "\n".join(target_lines)
 
     @staticmethod
@@ -636,7 +633,7 @@ class BaseMaisakaReplyGenerator(RetroReplyPromptMixin):
         """根据 reply 工具参数构建本次回复的篇幅要求。"""
 
         style_messages = {
-            "简短表达": "请简短的回复，允许句子残缺，奇怪表达，倒装，省略，符合口语习惯，符合省力随意回复习惯",
+            "简短表达": "用一两句自然口语回复，主语和指代保持清楚，长度按内容需要即可。",
             "正常回复": "",
             "长回复": "可以针对问题做出较为详细的评论和说明",
         }
@@ -727,8 +724,9 @@ class BaseMaisakaReplyGenerator(RetroReplyPromptMixin):
             reply_tool_args=reply_tool_args,
         )
         temporary_reply_style_message = self._build_temporary_reply_style_message(self._select_temporary_reply_style())
+        # Planner 的完整分析只用于监控，不充当真实发言或给正文模型的台词。
         reply_reference_message = self._build_reply_reference_message(
-            reply_reason,
+            "",
             str((reply_tool_args or {}).get("reply_reference") or ""),
         )
         requested_reply_style_message = self._build_requested_reply_style_message(
@@ -746,7 +744,12 @@ class BaseMaisakaReplyGenerator(RetroReplyPromptMixin):
                 ContextItemBuilder().set_role(RoleType.User).add_text_content(temporary_reply_style_message).build()
             )
         if reply_reference_message:
-            items.append(ContextItemBuilder().set_role(RoleType.User).add_text_content(reply_reference_message).build())
+            items.append(
+                ContextItemBuilder()
+                .set_role(RoleType.User)
+                .add_text_content("【回复信息参考】\n" + reply_reference_message)
+                .build()
+            )
         items.append(ContextItemBuilder().set_role(RoleType.User).add_text_content(final_user_message).build())
         if requested_reply_style_message:
             items.append(
