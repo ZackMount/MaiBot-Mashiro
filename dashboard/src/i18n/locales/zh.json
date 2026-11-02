@@ -1,5 +1,35 @@
 {
   "pluginWebUI": {
+    "settingsTitle": "插件页面",
+    "settingsHint": "决定哪些插件页面出现在顶栏、按什么顺序。只保存在当前浏览器，不影响插件权限。",
+    "topbarPreview": "顶栏预览",
+    "moreShort": "更多",
+    "topbarLimit": "顶栏最多放 {{count}} 个，其余进入「更多」",
+    "orderAndVisibility": "排序与显示",
+    "pluginCount": "{{count}} 个插件",
+    "hiddenLabel": "已隐藏",
+    "topbarLabel": "顶栏",
+    "overflowLabel": "更多菜单",
+    "sidebarLabel": "侧栏",
+    "overflowGroup": "以下进入「更多」菜单",
+    "sidebarGroup": "以下插件仅提供侧栏页面",
+    "visibleLabel": "显示",
+    "customReload": "重载页面",
+    "customStop": "停止页面",
+    "customStopped": "页面已停止。点击重载页面可再次运行。",
+    "customStopRequestRate": "请求过于频繁，页面已停止（允许每秒 20 次请求，最多突发 200 次）。",
+    "customStopLayoutRate": "页面尺寸更新过于频繁，页面已停止。",
+    "customStopHeight": "页面高度无效或超过 30000 像素，页面已停止。",
+    "customStopDuplicateId": "插件发送了重复的请求编号，页面已停止。",
+    "customStopTimeout": "页面连接超过 10 秒未就绪，页面已停止。",
+    "customStopManual": "你已停止页面。",
+    "customStopNavigation": "页面发生了重新加载或跳转，连接已停止。",
+    "workspaceOrder": "顶部 Tab 排序",
+    "workspaceOrderHint": "未隐藏的插件按此顺序排列，顶部最多显示两个，其余从旁边的“更多”菜单进入；当前打开的插件保持可见。排序立即生效，并保存在当前浏览器。",
+    "galleryLayout": "布局选择",
+    "paginationSummary": "第{{page}} / {{pages}}页 · 共{{total}}张",
+    "galleryAuto": "自动排布",
+    "galleryColumns": "{{count}}列",
     "extensions": "插件扩展",
     "manage": "管理插件页面",
     "more": "更多插件工作区",
@@ -30,7 +60,7 @@
     "toggleConnection": "切换后端连接",
     "viewAnnualSummary": "查看年度总结",
     "annualSummary": "2025 年度总结",
-    "searchPlaceholder": "搜索...",
+    "searchPlaceholder": "问麦麦你想知道的一切",
     "viewDocs": "查看麦麦文档",
     "docs": "麦麦文档",
     "switchToLight": "切换到浅色模式",
@@ -56,11 +86,10 @@
       "aiModelProvider": "模型厂商设置",
       "modelManagement": "模型管理",
       "promptManagement": "Prompt管理",
-      "promptGenerator": "人设生成器（测试功能）",
       "emojiManagement": "表情包",
+      "learning": "学习",
       "expressionManagement": "表达方式",
       "slangManagement": "黑话",
-      "behaviorLearning": "行为学习",
       "personInfo": "人物信息管理",
       "knowledgeGraph": "长期记忆图谱",
       "knowledgeBase": "长期记忆",
@@ -71,10 +100,10 @@
       "mcpSettings": "MCP 设置",
       "dataTransfer": "数据管理",
       "statistics": "详细统计数据",
-      "replyEffects": "回复效果",
       "logViewer": "日志查看器",
       "reasoningProcess": "推理过程",
       "maisakaMonitor": "麦麦观察",
+      "agent": "独立 Agent",
       "localChat": "本地聊天室",
       "settings": "WEBUI设置"
     }
@@ -109,6 +138,7 @@
     },
     "sections": {
       "breakdowns": "分类统计",
+      "embeddings": "嵌入统计",
       "distributions": "数据分布图表"
     },
     "breakdowns": {
@@ -150,8 +180,7 @@
       "cacheMissTokens": "缓存未命中Token",
       "cacheHitRate": "缓存命中率",
       "cost": "累计花费",
-      "avgTime": "平均耗时",
-      "stdTime": "耗时标准差",
+      "time": "耗时",
       "callsPerReply": "每次回复平均调用次数",
       "tokensPerReply": "每次回复平均Token",
       "tokensPerCall": "每次调用平均Token",
@@ -159,6 +188,14 @@
       "messages": "消息数量"
     },
     "distributions": {
+      "metric": "统计指标",
+      "costs": "花费",
+      "tokens": "Token",
+      "ownerTokens": "调用来源Token分布",
+      "modelTokens": "模型Token分布",
+      "moduleTokens": "模块Token分布",
+      "requestTypeTokens": "请求类型Token分布",
+      "chatTokens": "聊天流Token分布",
       "ownerCosts": "调用来源花费分布",
       "modelCosts": "模型花费分布",
       "moduleCosts": "模块花费分布",
@@ -199,6 +236,63 @@
     "logs": "日志"
   },
   "chat": {
+    "computerDesktop": "电脑桌面与接管",
+    "computer": {
+      "desktopSetup": "连接 dsh Desktop",
+      "desktopInstall": "使用 Desktop 自带的 dsh 命令安装桥接插件（Desktop 0.2.1-rc.2 起）：",
+      "desktopConnect": "启动或重启 Desktop，桥接文件通常留空，模型选项留空沿用 Desktop 配置。麦麦的任务会出现在 Desktop 的“麦麦”会话中；退出麦麦不会退出 Desktop。",
+      "dshSetup": "dsh 快速连接步骤",
+      "dshInstall": "尚未安装 dsh 时执行：",
+      "dshModel": "打开 dsh 设置模型和 API Key（已配置可跳过）：",
+      "dshEnable": "选择 dsh CLI 连接方式，启用并保存，然后在“独立 Agent”页面发送任务。找不到程序时，将 ACP 启动程序填写为 dsh.cmd 的绝对路径。",
+      "dshCommand": "预设自动启动：",
+      "disabled": "Agent 未启用",
+      "reasoning": "思考记录",
+      "connecting": "正在连接",
+      "disabled": "电脑功能未启用",
+      "stopped": "沙盒未运行",
+      "manual": "人工接管",
+      "paused": "已暂停决策",
+      "resting": "休息中",
+      "autonomous": "自主运行",
+      "running": "操作执行中",
+      "pause": "暂停电脑输入",
+      "takeover": "接管电脑",
+      "resume": "恢复运行",
+      "stop": "停止沙盒",
+      "restart": "重建沙盒",
+      "refresh": "刷新画面",
+      "help": "内部 Planner、子 Agent 和外接 Agent 共用此电脑。接管后可点击画面、右键和输入文字。接管会取消在途操作并阻止自主输入；暂停电脑输入不会中断已提交的操作。",
+      "screen": "电脑桌面",
+      "text": "接管后输入文字，支持中文",
+      "type": "输入文字",
+      "enter": "回车",
+      "takeoverFirst": "请先接管电脑",
+      "toolCall": "工具调用",
+      "toolResult": "执行结果",
+      "failed": "执行失败",
+      "thought": "思考",
+      "eventCount": "{{count}} 条记录",
+      "userMessage": "用户发言",
+      "systemEvent": "自主唤醒",
+      "queued": "等待处理",
+      "noEvents": "暂无运行记录",
+      "inputEvent": "输入与委托",
+      "stepEvent": "模型与工具",
+      "message": "给 Agent 下达任务",
+      "send": "发送",
+      "thinking": "思考中",
+      "tool": "操作中",
+      "idle": "空闲"
+    },
+    "setupTrial": {
+      "title": "试试和麦麦聊天",
+      "description": "先发一句「你好」，确认麦麦能正常回复。",
+      "repliedTitle": "已收到麦麦的回复",
+      "repliedDescription": "如果回复和说话风格符合预期，就可以继续配置消息平台。",
+      "keepChatting": "继续聊聊",
+      "continue": "试聊正常，配置消息平台"
+    },
     "botNameFallback": "麦麦",
     "userFallback": "用户",
     "userNameFallback": "人类",
@@ -340,6 +434,11 @@
       "sessionUnavailable": "无法建立聊天会话，请稍后重试",
       "virtualTabCreated": "虚拟身份标签页",
       "virtualTabCreatedDesc": "已创建 {{label}} 的对话"
+    },
+    "mobile": {
+      "back": "返回会话列表",
+      "close": "关闭",
+      "settings": "设置"
     }
   },
   "layout": {
@@ -357,6 +456,7 @@
     "title": "WEBUI设置",
     "description": "管理您的应用偏好设置",
     "tabs": {
+      "general": "通用",
       "appearance": "外观",
       "security": "安全",
       "other": "其他",
@@ -467,6 +567,7 @@
       "retroPanelDepthDesc": "控制凹陷区域与阴影的可见程度。"
     },
     "security": {
+      "tokenManagement": "Access Token 管理",
       "currentToken": "当前 Access Token",
       "yourToken": "您的访问令牌",
       "regenerate": "重新生成",
@@ -590,11 +691,23 @@
       "resetAllSettingsBtn": "重置所有设置为默认值",
       "confirmResetAll": "确认重置所有设置",
       "confirmResetAllDesc": "这将把所有界面设置恢复为默认值，包括主题、颜色、动画等偏好设置。此操作不会影响您的登录状态。确定要继续吗？",
-      "configWizardDesc": "重新进行初次配置向导，可以帮助您重新设置系统的基础配置。",
+      "configWizardDesc": "重新进行初次配置，可同时重置登录密码，从密码设置步骤重新开始。",
       "rerunSetup": "重新进行初次配置",
+      "resetSetupPassword": "同时重置登录密码",
+      "resetSetupPasswordDesc": "旧密码将立即失效，其他浏览器需要重新登录。当前浏览器会保持登录并进入密码设置页；新密码保存前使用临时凭证，重启后会重新生成。",
+      "setupPasswordResetSuccess": "密码已重置，即将进入密码设置页。",
+      "setupResetSuccess": "配置向导已重置，即将重新进入。",
+      "setupResetFailed": "无法重置配置向导，请重试。",
       "confirmRerunSetup": "确认重新配置",
       "confirmRerunSetupDesc": "这将带您重新进入初次配置向导。您可以重新设置系统的基础配置项。确定要继续吗？",
       "devToolsDesc": "以下功能仅供开发调试使用，可能会导致页面崩溃或异常。",
+      "resetNotificationStates": "重置所有通知状态",
+      "resetNotificationStatesDesc": "清除资讯已读记录、首页资讯条的关闭状态，以及各页面提示的关闭记录，相关通知会重新出现。不影响已完成的引导教程。",
+      "resetNotificationStatesAction": "重置",
+      "notificationsResetDone": "通知状态已重置",
+      "notificationsResetDoneDesc": "已清除 {{count}} 项状态，重新进入对应页面后生效。",
+      "alwaysShowUpdateButton": "永远显示更新按钮",
+      "alwaysShowUpdateButtonDesc": "开启后，无论是否检测到更新，始终显示右上角的主程序更新按钮。立即生效。",
       "alwaysShowUpdateNotice": "永远显示更新日志",
       "alwaysShowUpdateNoticeDesc": "开启后，每次进入 WebUI 都会依次弹出更新内容和插件兼容性提醒。刷新页面后生效。",
       "triggerError": "触发测试错误",
@@ -615,6 +728,60 @@
       "importInvalidDesc": "文件格式无效",
       "resetDone": "已重置",
       "resetDoneDesc": "所有设置已恢复为默认值，刷新页面以应用更改"
+    },
+    "selfUpdate": {
+      "title": "主程序更新",
+      "current": "当前版本 {{version}}",
+      "loading": "正在读取更新状态…",
+      "loadFailed": "读取更新状态失败",
+      "check": "检查更新",
+      "checking": "正在检查…",
+      "checkFailed": "检查更新失败",
+      "notChecked": "尚未检查更新",
+      "upToDate": "已是最新版本",
+      "checkedAt": "检查于 {{time}}",
+      "newVersion": "发现新版本 {{version}}",
+      "newCommits": "有 {{count}} 个新提交",
+      "behind": "落后官方 {{branch}} 分支 {{count}} 个提交",
+      "moreCommits": "仅显示最近 {{count}} 个提交",
+      "dependenciesChanged": "本次更新包含依赖变更，更新时会自动同步依赖（{{tool}}）",
+      "cannotApply": "暂时无法自动更新",
+      "dirtyFiles": "有改动的文件：",
+      "apply": "立即更新",
+      "applyFailed": "发起更新失败",
+      "confirmTitle": "更新到 {{version}}？",
+      "confirmDesc": "更新期间麦麦会离线几分钟：先停止运行，再拉取新版本、同步依赖并重新启动。拉取或依赖同步失败时会自动回滚到当前版本。建议先备份 data 目录。",
+      "confirmAction": "更新并重启",
+      "cancel": "取消",
+      "overlayTitle": "正在更新麦麦",
+      "overlayDesc": "正在拉取新版本并同步依赖，可能需要几分钟，请不要关闭麦麦",
+      "source": "更新来源：{{name}}",
+      "sourceHint": "按插件市场的镜像源设置依次尝试，只拉取官方仓库 Mai-with-u/MaiBot",
+      "packageSourceHint": "从 PyPI 安装正式版；更新前备份配置和数据库，同环境的其他实例须先停止。",
+      "packageConfirmDesc": "更新期间麦麦会离线几分钟。程序会先备份配置和数据库，再使用 uv 安装你确认的版本并重启；安装验证失败时尝试恢复原包和依赖。备份位于 data/self_update/backups，新版本启动后的数据库迁移不会自动回退。",
+      "lastSuccess": "已于 {{time}} 从 {{from}} 更新到 {{to}}",
+      "lastFailed": "{{time}} 更新到 {{to}} 失败",
+      "rolledBack": "已自动回滚到更新前的版本",
+      "rollbackFailed": "自动回滚失败，请手动检查仓库与依赖状态：{{error}}",
+      "toastSuccess": "更新完成",
+      "toastSuccessDesc": "已更新到 {{version}}",
+      "toastFailed": "更新失败",
+      "toastFailedDesc": "更新失败，详情见「设置 → 关于」",
+      "blockers": {
+        "uv_missing": "未找到 uv，请将 uv 加入启动环境的 PATH",
+        "not_uv_tool": "当前不是 PyPI 来源的 uv tool 安装，请使用原安装工具更新",
+        "package_runner_missing": "请通过 maibot run 启动以支持自动更新",
+        "other_instances_running": "请先停止同一工具环境中的其他 MaiBot 实例",
+        "package_busy": "工具环境正在更新，请稍后重试",
+        "git_missing": "未找到 Git，无法自更新",
+        "not_git_repo": "当前部署不是 Git 仓库（如 Docker 镜像或压缩包），请按对应的部署方式更新",
+        "detached_head": "当前不在任何分支上（分离头指针），无法自更新",
+        "unsupported_branch": "仅支持在 main 或 dev 分支上自更新",
+        "dirty_worktree": "存在未提交的本地改动，请先提交或还原",
+        "diverged": "本地存在官方分支没有的提交，无法快进更新",
+        "no_dependency_tool": "本次更新包含依赖变更，但未找到可用的依赖安装方式（uv 或 pip）",
+        "python_requirement_changed": "本次更新修改了 Python 版本要求，请手动更新"
+      }
     },
     "about": {
       "openSource": "开源项目",
@@ -712,7 +879,8 @@
       },
       "customToken": {
         "title": "设置登录密码",
-        "description": ""
+        "description": "不设置的话，每次启动都会换一个随机密码。",
+        "label": "登录密码"
       },
       "botBasic": {
         "title": "Bot基础",
@@ -762,7 +930,7 @@
       "saveFailedTitle": "保存失败",
       "validationFailedTitle": "验证失败",
       "completeSuccessTitle": "配置完成",
-      "completeSuccessDescription": "{{appName}} 配置已保存并生效。",
+      "completeSuccessDescription": "{{appName}} 配置已保存。先在「聊聊」发一句「你好」，试试麦麦的回复和说话风格。",
       "completeFailedTitle": "配置失败",
       "skipFailedTitle": "跳过失败",
       "customTokenSuccessTitle": "密码已更新",
@@ -774,7 +942,7 @@
       "next": "下一步",
       "skip": "跳过向导",
       "complete": "完成配置",
-      "saveToken": "保存密码",
+      "saveToken": "保存并继续",
       "saving": "保存中...",
       "completing": "完成中..."
     },
@@ -787,6 +955,7 @@
     "defaults": {
       "personality": {
         "personality": "是一个大二女大学生，现在正在上网和群友聊天。有轻微攻击性",
+        "behaviorStyle": "自然参与日常聊天，不会没话题硬找话题；先理解上下文，再决定回复或保持安静。",
         "replyStyle": "你的风格平淡简短。可以参考贴吧，知乎和微博的回复风格。不浮夸不长篇大论，不要过分修辞和复杂句。",
         "multipleReplyStyles": {
           "plain": "你的风格平淡但不失讽刺，很简短，很白话。可以参考贴吧、微博的回复风格。",
@@ -804,11 +973,19 @@
         "noticeTitle": "当前仍在使用启动时随机密码",
         "noticeDescription": "需要修改登录密码，如果不修改，每次会随机生成密码",
         "label": "自定义密码 *",
-        "placeholder": "请输入一个安全且容易保存的密码",
+        "placeholder": "输入新密码",
         "description": "",
         "requirements": "密码要求",
-        "show": "显示密码",
-        "hide": "隐藏密码"
+        "show": "显示",
+        "hide": "隐藏",
+        "met": "已满足",
+        "unmet": "未满足",
+        "rules": {
+          "minLength": "10 位以上",
+          "hasUppercase": "大写字母",
+          "hasLowercase": "小写字母",
+          "hasSpecialChar": "特殊符号"
+        }
       },
       "botBasic": {
         "platform": {
@@ -834,7 +1011,7 @@
           "description": "机器人在该平台上的账号标识"
         },
         "nickname": {
-          "label": "昵称 *",
+          "label": "昵称",
           "placeholder": "请输入机器人的昵称",
           "description": "麦麦Bot的名称"
         },
@@ -847,15 +1024,26 @@
         }
       },
       "personality": {
+        "expand": "展开编辑{{field}}",
+        "presets": {
+          "default": "默认（麦麦）",
+          "label": "人设预设",
+          "description": "选择后会替换下方的人格特征、行为风格和回复风格，填入后仍可自由修改。"
+        },
         "personality": {
-          "label": "人格特征 *",
+          "label": "人格特征",
           "placeholder": "描述机器人的人格特质和身份特征（建议 120 字以内）",
-          "description": "例如：是一个女大学生，现在在读大二，会刷贴吧"
+          "description": "描述bot的核心人格特征，影响bot如何认识自己"
+        },
+        "behaviorStyle": {
+          "label": "行为风格",
+          "placeholder": "描述何时参与聊天、如何观察局面以及何时保持安静",
+          "description": "描述bot的行为，决定bot行为方式"
         },
         "replyStyle": {
-          "label": "表达风格 *",
+          "label": "表达风格",
           "placeholder": "描述机器人说话的表达风格、表达习惯",
-          "description": "例如：回复平淡一些，简短一些，说中文，参考贴吧、知乎和微博的回复风格"
+          "description": "直接影响bot如何说话，说话风格"
         },
         "multipleReplyStyle": {
           "label": "备用表达风格",
@@ -924,7 +1112,7 @@
       "modelSetup": {
         "planner": {
           "identifier": {
-            "label": "用于规划的 模型 名称",
+            "label": "用于 规划思考 的模型",
             "description": "填写 API 服务商对应的模型标识，例如 deepseek-chat。"
           },
           "visual": {
@@ -933,7 +1121,7 @@
         },
         "replyer": {
           "identifier": {
-            "label": "用于回复的 模型 名称",
+            "label": "用于 回复发言 的模型",
             "description": "填写 API 服务商对应的模型标识，例如 deepseek-chat。"
           },
           "visual": {
@@ -1019,7 +1207,7 @@
     "navigate": "导航",
     "select": "选择",
     "close": "关闭",
-    "aiSearch": "AI 搜索",
+    "aiSearch": "提问",
     "aiSearching": "AI 理解中",
     "aiHint": "可以描述你想调整的效果，例如“麦麦说话太频繁”",
     "progressTitle": "搜索过程",
@@ -1028,9 +1216,9 @@
     "progressStart": "开始分析问题",
     "progressPlanning": "第 {{round}} 轮：规划检索",
     "progressSearchWebui": "搜索页面和配置",
-    "progressReadWebui": "读取页面与配置说明",
     "progressSearchDocs": "搜索官方文档",
     "progressReadDocs": "读取官方文档",
+    "progressReadConfig": "读取本地配置",
     "progressTool": "执行搜索操作",
     "progressCompleted": "{{action}}完成（{{count}} 项）",
     "progressFailed": "{{action}}失败",
@@ -1063,16 +1251,14 @@
       "botConfigDesc": "配置麦麦的详细设置和共享组",
       "model": "麦麦模型配置",
       "modelDesc": "配置模型参数",
-      "promptGeneratorDesc": "将文段或人设生成可注入配置的人设块",
       "emoji": "表情包",
-      "emojiDesc": "管理麦麦的表情包",
       "expression": "表达方式",
+      "learningDesc": "管理麦麦学习到的表达方式、黑话和表情包",
       "expressionDesc": "管理麦麦的表达方式",
       "person": "人物信息管理",
       "personDesc": "管理人物信息",
       "jargon": "黑话",
       "jargonDesc": "管理麦麦学习到的黑话和俚语",
-      "behaviorLearningDesc": "浏览行为经验路径和检索命中",
       "statistics": "统计信息",
       "statisticsDesc": "查看使用统计",
       "plugins": "插件市场",
@@ -1393,6 +1579,11 @@
       "restarting": "重启中...",
       "expressionReview": "表达审核",
       "viewLogs": "查看日志",
+      "chat": "麦麦聊聊",
+      "docs": "前往文档",
+      "replyerLogs": "回复日志",
+      "plannerLogs": "规划日志",
+      "reasoningLogs": "推理日志",
       "pluginManage": "插件管理",
       "systemSettings": "WEBUI设置",
       "pluginConfig": "插件配置",
@@ -1412,6 +1603,12 @@
         "restart": "重启麦麦主程序",
         "expressionReview": "打开表达学习审核弹窗",
         "viewLogs": "查看 WebUI 日志",
+        "chat": "打开麦麦聊天",
+        "docs": "打开麦麦使用文档",
+        "replyerLogs": "查看回复阶段的推理记录",
+        "plannerLogs": "查看规划阶段的推理记录",
+        "reasoningLogs": "打开推理日志",
+        "configSection": "打开主程序配置 / {{section}}",
         "pluginManage": "打开插件市场与插件管理",
         "systemSettings": "打开 WEBUI设置",
         "pluginConfig": "打开已安装插件配置页面",
@@ -1494,12 +1691,17 @@
     "news": {
       "title": "资讯",
       "description": "来自服务器的新闻动态",
+      "unread": "未读",
+      "unreadCount": "{{count}} 条未读",
       "refresh": "刷新资讯",
       "retry": "重新加载",
       "open": "打开资讯详情",
       "openLink": "打开原文链接",
+      "openPlugin": "查看插件",
       "pinned": "置顶",
-      "empty": "暂无资讯"
+      "empty": "暂无资讯",
+      "dismiss": "关闭资讯条",
+      "next": "下一条资讯"
     },
     "storage": {
       "title": "存储占用",
@@ -1563,6 +1765,77 @@
       "requestTrend": "每小时请求量趋势图，显示最近若干小时的请求次数变化",
       "costTrend": "API花费趋势图，显示最近若干小时的API调用成本变化",
       "tokenUsage": "Token消耗趋势图，显示最近若干小时的Token使用量变化"
+    },
+    "mobile": {
+      "title": "麦麦",
+      "openSettings": "WebUI 设置"
+    }
+  },
+  "mobileNav": {
+    "label": "主导航",
+    "home": "首页",
+    "chat": "聊天",
+    "manage": "管理",
+    "me": "我的",
+    "search": "搜索",
+    "live": "麦麦实时",
+    "botInitial": "麦",
+    "backHome": "返回首页",
+    "backManage": "返回管理"
+  },
+  "manage": {
+    "searchPlaceholder": "搜索页面或设置项",
+    "groups": {
+      "runtime": "运行记录"
+    }
+  },
+  "dynamicForm": {
+    "mobileTextEmpty": "未填写",
+    "mobileTextCancel": "取消",
+    "mobileTextDone": "完成"
+  },
+  "dataManagement": {
+    "transfer": "备份与缓存"
+  },
+  "files": {
+    "disabled": "文件功能已关闭，请在「能力」中开启。",
+    "openSettings": "打开能力设置",
+    "title": "文件",
+    "description": "附件按聊天归属管理，按需下载；文本可预览，本地上传和生成的原件保留到手动删除。",
+    "storage": "已用空间",
+    "reserved": "预留空间",
+    "maximum": "单文件上限",
+    "chat": "聊天",
+    "allChats": "全部聊天",
+    "refresh": "刷新",
+    "upload": "上传文件",
+    "chooseChat": "先选择一个聊天，再上传文件。",
+    "download": "下载",
+    "read": "阅读文本",
+    "sendTo": "发送到聊天…",
+    "confirmSend": "确认将文件发送到「{{name}}」？",
+    "clearCache": "清理缓存",
+    "delete": "删除",
+    "confirmDelete": "确认删除「{{name}}」？本地原件无法恢复。",
+    "empty": "暂无附件",
+    "previous": "上一页",
+    "next": "下一页",
+    "encoding": "文本编码",
+    "close": "关闭",
+    "remote": "平台缓存",
+    "original": "本地原件",
+    "removeAttachment": "移除待发送附件（原件仍保存在文件管理中）",
+    "uploadFailed": "文件上传失败",
+    "state": {
+      "remote": "未下载",
+      "ready": "已就绪",
+      "failed": "失败",
+      "uploading": "上传中",
+      "downloading": "下载中"
+    },
+    "delivery": {
+      "sent": "文件已发送",
+      "unknown": "投递结果不确定，请核对聊天后再决定是否重发。"
     }
   }
 }

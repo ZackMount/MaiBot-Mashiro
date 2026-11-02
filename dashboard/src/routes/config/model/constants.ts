@@ -29,6 +29,26 @@ export const TASK_CONFIGS = [
     description: '负责决定麦麦该什么时候回复',
   },
   {
+    key: 'memory' as const,
+    title: '长期记忆 (memory)',
+    description: '用于长期记忆总结、抽取和写回',
+  },
+  {
+    key: 'learner' as const,
+    title: '表达学习 (learner)',
+    description: '用于表达方式和黑话学习',
+  },
+  {
+    key: 'fast_model' as const,
+    title: '快速模型 (fast_model)',
+    description: '用于表达方式选择、回复断句等快速任务',
+  },
+  {
+    key: 'emoji' as const,
+    title: '表情包选择 (emoji)',
+    description: '用于表情包发送',
+  },
+  {
     key: 'utils' as const,
     title: '组件模型 (utils)',
     description: '用于表情包、取名、关系、情绪变化等组件',
@@ -69,8 +89,15 @@ export const TASK_CONFIGS = [
     key: 'image_embedding' as const,
     title: '图片嵌入模型 (image_embedding)',
     description: '用于图片向量化，必须实现图片输入到向量的协议',
+    hideTemperature: true,
+    hideMaxTokens: true,
     hideSelectionStrategy: true,
     singleModel: true,
+  },
+  {
+    key: 'web_search' as const,
+    title: '联网搜索 (web_search)',
+    description: '使用已分配的联网服务搜索和读取网页',
   },
 ] as const
 
@@ -78,6 +105,7 @@ export const TASK_CONFIGS = [
  * 默认模型信息
  */
 export const DEFAULT_MODEL_INFO = {
+  model_type: 'llm',
   model_identifier: '',
   name: '',
   api_provider: '',

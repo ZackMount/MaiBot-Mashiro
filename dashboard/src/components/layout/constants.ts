@@ -1,18 +1,15 @@
 import { createElement } from 'react'
 import {
-  Activity,
   Box,
-  Brain,
   Database,
   FileText,
   HardDrive,
-  Hash,
   Home,
   MessageCircle,
   MessageSquare,
+  Monitor,
   Puzzle,
   Settings,
-  Smile,
   Store,
   Wifi,
 } from 'lucide-react'
@@ -26,16 +23,12 @@ const LocalChatIcon = createStreamlineIcon('desktop-chat-remix', MessageCircle)
 const BotConfigIcon = createStreamlineIcon('page-setting-remix', Settings)
 const ModelIcon = createStreamlineIcon('module-remix', Box)
 const PromptIcon = createStreamlineIcon('script-1-remix', FileText)
-const EmojiIcon = createStreamlineIcon('happy-face-remix', Smile)
-const ExpressionIcon = createStreamlineIcon('chat-bubble-square-write-remix', MessageSquare)
-const JargonIcon = createStreamlineIcon('sign-hashtag-solid', Hash)
-const BehaviorIcon = createStreamlineIcon('cyborg-solid', Brain)
+const LearningIcon = createStreamlineIcon('chat-bubble-square-write-remix', MessageSquare)
 const KnowledgeIcon = createStreamlineIcon('user-sticker-square-remix', Database)
 const PluginConfigIcon = createStreamlineIcon('application-add-remix', Puzzle)
 const AdapterManagementIcon = createStreamlineIcon('router-wifi-network-solid', Wifi)
 const PluginMarketIcon = createStreamlineIcon('store-2-solid', Store)
 const DataTransferIcon: MenuIcon = (props) => createElement(HardDrive, props)
-const ReplyEffectsIcon: MenuIcon = (props) => createElement(Activity, props)
 
 export const menuSections: MenuSection[] = [
   {
@@ -48,6 +41,7 @@ export const menuSections: MenuSection[] = [
         searchDescription: 'search.items.homeDesc',
       },
       { icon: LocalChatIcon, label: 'workspace.chat', path: '/chat' },
+      { icon: Monitor, label: 'chat.computerDesktop', path: '/computer', featureFlag: 'computer' },
     ],
   },
   {
@@ -77,29 +71,10 @@ export const menuSections: MenuSection[] = [
     title: 'sidebar.groups.botResources',
     items: [
       {
-        icon: EmojiIcon,
-        label: 'sidebar.menu.emojiManagement',
-        path: '/resource/emoji',
-        searchDescription: 'search.items.emojiDesc',
-      },
-      {
-        icon: ExpressionIcon,
-        label: 'sidebar.menu.expressionManagement',
-        path: '/resource/expression',
-        searchDescription: 'search.items.expressionDesc',
-      },
-      {
-        icon: JargonIcon,
-        label: 'sidebar.menu.slangManagement',
-        path: '/resource/jargon',
-        searchDescription: 'search.items.jargonDesc',
-      },
-      {
-        icon: BehaviorIcon,
-        label: 'sidebar.menu.behaviorLearning',
-        path: '/resource/behavior',
-        searchDescription: 'search.items.behaviorLearningDesc',
-        featureFlag: 'behaviorLearning',
+        icon: LearningIcon,
+        label: 'sidebar.menu.learning',
+        path: '/resource/learning',
+        searchDescription: 'search.items.learningDesc',
       },
       {
         icon: KnowledgeIcon,
@@ -124,12 +99,6 @@ export const menuSections: MenuSection[] = [
     title: 'sidebar.groups.advancedTools',
     items: [
       { icon: PromptIcon, label: 'sidebar.menu.promptManagement', path: '/config/prompts' },
-      {
-        icon: ReplyEffectsIcon,
-        label: 'sidebar.menu.replyEffects',
-        path: '/reply-effects',
-        featureFlag: 'replyEffects',
-      },
       {
         icon: DataTransferIcon,
         label: 'sidebar.menu.dataTransfer',

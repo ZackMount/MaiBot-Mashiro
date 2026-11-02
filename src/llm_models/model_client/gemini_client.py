@@ -24,8 +24,9 @@ from google.genai.types import (
     ContentUnion,
     EmbedContentConfig,
     EmbedContentResponse,
-    FunctionDeclaration,
     FunctionCall,
+    FunctionCallingConfig,
+    FunctionDeclaration,
     FunctionResponse,
     GenerateContentConfig,
     GenerateContentResponse,
@@ -37,9 +38,11 @@ from google.genai.types import (
     SafetySetting,
     ThinkingConfig,
     Tool,
+    ToolConfig,
 )
 
 from src.common.logger import get_logger
+from src.common.http_client import get_shared_ssl_context
 from src.config.model_configs import APIProvider
 from src.llm_models.exceptions import (
     EmptyResponseException,
@@ -730,7 +733,11 @@ def _build_http_options(api_provider: APIProvider) -> HttpOptions:
     Returns:
         HttpOptions: Gemini SDK HTTP 选项对象。
     """
-    http_options_payload: Dict[str, Any] = {}
+    ssl_context = get_shared_ssl_context()
+    http_options_payload: Dict[str, Any] = {
+        "client_args": {"verify": ssl_context},
+        "async_client_args": {"verify": ssl_context},
+    }
     if api_provider.timeout is not None:
         http_options_payload["timeout"] = int(api_provider.timeout * 1000)
 
@@ -1034,6 +1041,8 @@ class GeminiClient(AdapterClient[AsyncIterator[GenerateContentResponse], Generat
                 extra_params=request.extra_params,
                 enable_google_search=enable_google_search,
             )
+            if request.tool_choice == "none":
+                generation_config.tool_config = ToolConfig(function_calling_config=FunctionCallingConfig(mode="NONE"))
             snapshot_provider_request["request_kwargs"] = {
                 "config": generation_config,
                 "contents": contents,
@@ -1079,7 +1088,8 @@ class GeminiClient(AdapterClient[AsyncIterator[GenerateContentResponse], Generat
             raise
         except (ClientError, ServerError) as exc:
             status_code = int(getattr(exc, "code", 500) or 500)
-            snapshot_path = save_failed_request_snapshot(
+            snapshot_path = await asyncio.to_thread(
+                save_failed_request_snapshot,
                 api_provider=self.api_provider,
                 client_type="gemini",
                 error=exc,
@@ -1094,7 +1104,8 @@ class GeminiClient(AdapterClient[AsyncIterator[GenerateContentResponse], Generat
             raise wrapped_error from exc
         except (UnknownFunctionCallArgumentError, UnsupportedFunctionError, FunctionInvocationError) as exc:
             wrapped_error = RespParseException(None, f"Gemini 工具调用参数错误: {exc}")
-            snapshot_path = save_failed_request_snapshot(
+            snapshot_path = await asyncio.to_thread(
+                save_failed_request_snapshot,
                 api_provider=self.api_provider,
                 client_type="gemini",
                 error=wrapped_error,
@@ -1107,7 +1118,8 @@ class GeminiClient(AdapterClient[AsyncIterator[GenerateContentResponse], Generat
             attach_request_snapshot(wrapped_error, snapshot_path)
             raise wrapped_error from exc
         except EmptyResponseException as exc:
-            snapshot_path = save_failed_request_snapshot(
+            snapshot_path = await asyncio.to_thread(
+                save_failed_request_snapshot,
                 api_provider=self.api_provider,
                 client_type="gemini",
                 error=exc,
@@ -1122,7 +1134,8 @@ class GeminiClient(AdapterClient[AsyncIterator[GenerateContentResponse], Generat
         except Exception as exc:
             if has_request_snapshot(exc):
                 raise
-            snapshot_path = save_failed_request_snapshot(
+            snapshot_path = await asyncio.to_thread(
+                save_failed_request_snapshot,
                 api_provider=self.api_provider,
                 client_type="gemini",
                 error=exc,
@@ -1185,7 +1198,8 @@ class GeminiClient(AdapterClient[AsyncIterator[GenerateContentResponse], Generat
             )
         except (ClientError, ServerError) as exc:
             status_code = int(getattr(exc, "code", 500) or 500)
-            snapshot_path = save_failed_request_snapshot(
+            snapshot_path = await asyncio.to_thread(
+                save_failed_request_snapshot,
                 api_provider=self.api_provider,
                 client_type="gemini",
                 error=exc,
@@ -1201,7 +1215,8 @@ class GeminiClient(AdapterClient[AsyncIterator[GenerateContentResponse], Generat
         except Exception as exc:
             if has_request_snapshot(exc):
                 raise
-            snapshot_path = save_failed_request_snapshot(
+            snapshot_path = await asyncio.to_thread(
+                save_failed_request_snapshot,
                 api_provider=self.api_provider,
                 client_type="gemini",
                 error=exc,
@@ -1224,7 +1239,8 @@ class GeminiClient(AdapterClient[AsyncIterator[GenerateContentResponse], Generat
         response = APIResponse(raw_data=raw_response)
         if not raw_response.embeddings:
             exc = RespParseException(raw_response, "Gemini 嵌入响应解析失败，缺少 embeddings 字段。")
-            snapshot_path = save_failed_request_snapshot(
+            snapshot_path = await asyncio.to_thread(
+                save_failed_request_snapshot,
                 api_provider=self.api_provider,
                 client_type="gemini",
                 error=exc,
@@ -1323,7 +1339,8 @@ class GeminiClient(AdapterClient[AsyncIterator[GenerateContentResponse], Generat
             )
         except (ClientError, ServerError) as exc:
             status_code = int(getattr(exc, "code", 500) or 500)
-            snapshot_path = save_failed_request_snapshot(
+            snapshot_path = await asyncio.to_thread(
+                save_failed_request_snapshot,
                 api_provider=self.api_provider,
                 client_type="gemini",
                 error=exc,
@@ -1339,7 +1356,8 @@ class GeminiClient(AdapterClient[AsyncIterator[GenerateContentResponse], Generat
         except Exception as exc:
             if has_request_snapshot(exc):
                 raise
-            snapshot_path = save_failed_request_snapshot(
+            snapshot_path = await asyncio.to_thread(
+                save_failed_request_snapshot,
                 api_provider=self.api_provider,
                 client_type="gemini",
                 error=exc,

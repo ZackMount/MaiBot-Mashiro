@@ -1,13 +1,15 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Callable, Coroutine, Dict, List, Set, Tuple, Type
+from typing import Any, Callable, Coroutine, Dict, List, Literal, Set, Tuple, Type
 
 import asyncio
+import copy
 import dataclasses
 import time
 import uuid
 
 from src.common.logger import get_logger
+from src.common.startup_diagnostics import diagnostic_stage
 from src.config.config import config_manager
 from src.config.model_configs import APIProvider, ModelInfo
 from src.llm_models.payload_content.context_item import (
@@ -115,6 +117,9 @@ class APIResponse:
     embedding: List[float] | None = None
     """嵌入向量"""
 
+    rate_limit_wait_seconds: float = 0.0
+    """本次逻辑请求累计的嵌入限速等待时间，不计入模型耗时。"""
+
     usage: UsageRecord | None = None
     """使用情况 (prompt_tokens, completion_tokens, total_tokens)"""
 
@@ -129,6 +134,9 @@ class APIResponse:
 
     request_wire_payload: Any = field(default=None, repr=False)
     """本次成功请求的最终 wire 载荷，仅用于缓存诊断和可观测性。"""
+
+    request_snapshot: "ResponseRequest | None" = field(default=None, repr=False)
+    """实际成功请求的独立快照，不包含认证信息或运行中的回调。"""
 
     request_protocol_hash: str | None = None
     """图片嵌入客户端计算的协议指纹；自动适配图片嵌入协议时填充，
@@ -241,6 +249,7 @@ class RequestTraceContext:
     model_attempt: int = 0
     snapshot_path: str = ""
     current_attempt_started_at: float = 0.0
+    rate_limit_wait_seconds: float = 0.0
     generation_attempts: List[GenerationAttempt] = field(default_factory=list)
 
     def replace_attempt_status(self, attempt_number: int, status: str) -> None:
@@ -270,6 +279,7 @@ class ResponseRequest:
     extra_params: Dict[str, Any] = field(default_factory=dict)
     trace_context: RequestTraceContext | None = None
     logical_turn_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    tool_choice: Literal["none"] | None = None
 
     def copy_with(self, **changes: Any) -> "ResponseRequest":
         """基于当前请求创建一个带局部变更的新请求。
@@ -284,6 +294,7 @@ class ResponseRequest:
             "model_info": self.model_info,
             "context_items": list(self.context_items),
             "tool_options": None if self.tool_options is None else list(self.tool_options),
+            "tool_choice": self.tool_choice,
             "max_tokens": self.max_tokens,
             "temperature": self.temperature,
             "response_format": self.response_format,
@@ -297,6 +308,13 @@ class ResponseRequest:
         payload.update(changes)
         return ResponseRequest(**payload)
 
+    def detached_snapshot(self) -> "ResponseRequest":
+        """冻结输入和模型设置，解除中断、回调及诊断上下文的生命周期。"""
+        return copy.deepcopy(self.copy_with(
+            stream_response_handler=None, async_response_parser=None,
+            interrupt_flag=None, trace_context=None,
+        ))
+
 
 @dataclass(slots=True)
 class EmbeddingRequest:
@@ -306,6 +324,7 @@ class EmbeddingRequest:
     embedding_input: str
     extra_params: Dict[str, Any] = field(default_factory=dict)
     trace_context: RequestTraceContext | None = None
+    retry_handled_externally: bool = False
 
 
 @dataclass(slots=True)
@@ -349,6 +368,13 @@ class BaseClient(ABC):
             api_provider: API 提供商配置。
         """
         self.api_provider = api_provider
+
+    def prepare_sync_resources(self) -> None:
+        """预加载 SDK 的同步资源；异步获取入口会在工作线程中调用此方法。
+
+        此阶段不得发起异步请求或绑定事件循环。网络连接仍由调用方循环首次使用。
+        """
+        return None
 
     @abstractmethod
     async def get_response(self, request: ResponseRequest) -> APIResponse:
@@ -443,6 +469,10 @@ class ClientRegistry:
         """(事件循环, APIProvider.name) -> BaseClient 的映射表。"""
         self._owner_client_types: Dict[str, Set[str]] = {}
         """插件 ID -> 该插件拥有的 client_type 集合。"""
+        self._cache_generation = 0
+        self._client_initializations: Dict[
+            Tuple[asyncio.AbstractEventLoop, str, int, int], asyncio.Task[BaseClient]
+        ] = {}
         config_manager.register_reload_callback(self.clear_client_instance_cache)
 
     def register_client_class(self, client_type: str) -> Callable[[Type[BaseClient]], Type[BaseClient]]:
@@ -638,6 +668,8 @@ class ClientRegistry:
     def get_client_class_instance(self, api_provider: APIProvider, force_new: bool = False) -> BaseClient:
         """获取注册的 API 客户端实例。
 
+        此方法是兼容同步入口；协程应使用 get_client_class_instance_async。
+
         Args:
             api_provider: APIProvider 实例。
             force_new: 是否强制创建新实例。
@@ -652,22 +684,81 @@ class ClientRegistry:
         # 如果强制创建新实例，直接创建不使用缓存
         if force_new:
             if registration := self.client_registry.get(api_provider.client_type):
-                return registration.factory(api_provider)
+                return self._build_prepared_client(api_provider, registration)
             raise KeyError(f"'{api_provider.client_type}' 类型的 Client 未注册")
 
-        # 异步 HTTP 客户端绑定创建它的事件循环，同一循环内按 Provider 复用。
+        # 异步 HTTP 连接在实际请求时绑定循环，同一调用方循环内按 Provider 复用。
         cache_key = self._get_client_cache_key(api_provider)
         if cache_key not in self.client_instance_cache:
             if registration := self.client_registry.get(api_provider.client_type):
-                self.client_instance_cache[cache_key] = registration.factory(api_provider)
+                self.client_instance_cache[cache_key] = self._build_prepared_client(api_provider, registration)
             else:
                 raise KeyError(f"'{api_provider.client_type}' 类型的 Client 未注册")
         return self.client_instance_cache[cache_key]
 
     def clear_client_instance_cache(self) -> None:
         """清空客户端实例缓存。"""
+        # 正在初始化的旧配置实例仍可服务原请求，但不能重新填入新配置缓存。
+        self._cache_generation += 1
         self.client_instance_cache.clear()
         logger.info("检测到配置重载，已清空LLM客户端实例缓存")
+
+    @staticmethod
+    def _build_prepared_client(api_provider: APIProvider, registration: ClientProviderRegistration) -> BaseClient:
+        """一次完成客户端构造及 SDK 懒加载，不在工作线程中发起网络请求。"""
+        with diagnostic_stage(f"llm.client_create:{api_provider.client_type}"):
+            client = registration.factory(api_provider)
+            client.prepare_sync_resources()
+            return client
+
+    async def get_client_class_instance_async(self, api_provider: APIProvider) -> BaseClient:
+        """异步获取客户端：重初始化在线程中执行，缓存仍按调用方事件循环隔离。"""
+        from . import ensure_client_type_loaded
+
+        loop = asyncio.get_running_loop()
+        cache_key = (loop, api_provider.name)
+        if cached := self.client_instance_cache.get(cache_key):
+            return cached
+
+        # 新增供应商或配置热重载可能首次导入 SDK，不能在事件循环中导入。
+        generation = self._cache_generation
+        await asyncio.to_thread(ensure_client_type_loaded, api_provider.client_type)
+        registration = self.client_registry.get(api_provider.client_type)
+        if registration is None:
+            raise KeyError(f"'{api_provider.client_type}' 类型的 Client 未注册")
+        if generation == self._cache_generation and (cached := self.client_instance_cache.get(cache_key)):
+            return cached
+
+        initialization_key = (loop, api_provider.name, id(registration), generation)
+        task = self._client_initializations.get(initialization_key)
+        if task is None:
+
+            async def initialize() -> BaseClient:
+                if registration.builtin:
+                    client = await asyncio.to_thread(self._build_prepared_client, api_provider, registration)
+                else:
+                    # 插件代理的工厂可能需要当前循环；宿主内不执行第三方 SDK 的构造。
+                    client = registration.factory(api_provider)
+                if (
+                    generation == self._cache_generation
+                    and self.client_registry.get(api_provider.client_type) is registration
+                ):
+                    self.client_instance_cache[cache_key] = client
+                return client
+
+            task = asyncio.create_task(initialize(), name=f"llm.client_initialize:{api_provider.client_type}")
+            self._client_initializations[initialization_key] = task
+
+            def finish(completed: asyncio.Task[BaseClient]) -> None:
+                self._client_initializations.pop(initialization_key, None)
+                # 所有调用方均被取消时，也完整记录后台初始化异常。
+                if not completed.cancelled() and (error := completed.exception()) is not None:
+                    logger.error("LLM 客户端初始化失败", exc_info=(type(error), error, error.__traceback__))
+
+            task.add_done_callback(finish)
+
+        # 同一循环的并发请求共享初始化；取消单个请求不能取消其他请求使用的客户端。
+        return await asyncio.shield(task)
 
 
 client_registry = ClientRegistry()

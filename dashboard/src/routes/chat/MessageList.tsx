@@ -1,3 +1,5 @@
+import { ConversationAvatar, MessageBubble, MessageNotice } from '@/components/ui/conversation'
+import { DataPanel } from '@/components/ui/surface'
 import { defaultRangeExtractor, useVirtualizer, type Range } from '@tanstack/react-virtual'
 import { Bot, Sparkles, User } from 'lucide-react'
 import {
@@ -14,6 +16,8 @@ import { useTranslation } from 'react-i18next'
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { useResolvedAvatarUrl } from '@/lib/avatar-url'
+import { ImageGalleryProvider, type GalleryImage } from '@/components/image-gallery'
+import { useVirtualizerUnmountGuard } from '@/lib/use-virtualizer-unmount-guard'
 import { cn } from '@/lib/utils'
 
 import { ChatScrollContext, type ChatScrollContextValue } from './ChatScrollContext'
@@ -156,7 +160,7 @@ function RuntimeStatusIndicator({
  * 聊天消息列表：支持连续同发送者消息分组、富文本与系统/错误信息样式。
  */
 export function MessageList({
-  messages,
+  messages: incomingMessages,
   isLoadingHistory,
   botDisplayName,
   botQq,
@@ -168,6 +172,31 @@ export function MessageList({
   runtimeStatus,
 }: MessageListProps) {
   const { t } = useTranslation()
+  // 历史数据可能包含同一消息的重复存储记录。按消息身份合并后再进行分组、
+  // 定位和测量，避免不同高度的行共用虚拟列表缓存而持续触发更新。
+  const messages = useMemo(
+    () => Array.from(new Map(incomingMessages.map((message) => [message.id, message])).values()),
+    [incomingMessages]
+  )
+  // 当前会话里的图片与表情，按出现顺序排列，供大图预览切换上一张/下一张。
+  const galleryImages = useMemo(() => {
+    const images = new Map<string, GalleryImage>()
+    for (const message of messages) {
+      if (message.message_type !== 'rich') continue
+      for (const segment of message.segments ?? []) {
+        if (segment.type !== 'image' && segment.type !== 'emoji') continue
+        const src = String(segment.data)
+        if (!images.has(src)) {
+          images.set(src, {
+            src,
+            alt: segment.type === 'emoji' ? t('chat.media.emoji') : t('chat.media.image'),
+          })
+        }
+      }
+    }
+    return Array.from(images.values())
+  }, [messages, t])
+
   const viewportRef = useRef<HTMLDivElement>(null)
   const endRef = useRef<HTMLDivElement>(null)
   const messageRefs = useRef<Map<string, HTMLDivElement>>(new Map())
@@ -251,6 +280,7 @@ export function MessageList({
     overscan: 8,
     rangeExtractor,
   })
+  useVirtualizerUnmountGuard(rowVirtualizer)
   const virtualListSize = rowVirtualizer.getTotalSize()
 
   useLayoutEffect(() => {
@@ -376,7 +406,7 @@ export function MessageList({
 
   if (messages.length === 0 && !isLoadingHistory) {
     return (
-      <div className="min-h-0 min-w-0 flex-1 overflow-hidden">
+      <DataPanel padding="none" data-conversation-screen="true">
         <ScrollArea
           className="h-full w-full"
           contentClassName="!block w-full min-w-0"
@@ -386,12 +416,13 @@ export function MessageList({
         >
           <EmptyState botName={botDisplayName} />
         </ScrollArea>
-      </div>
+      </DataPanel>
     )
   }
 
   return (
-    <div className="min-h-0 min-w-0 flex-1 overflow-hidden">
+    <ImageGalleryProvider images={galleryImages}>
+    <DataPanel padding="none" data-conversation-screen="true">
       <ScrollArea
         className="h-full w-full"
         contentClassName="!block w-full min-w-0"
@@ -400,7 +431,7 @@ export function MessageList({
         viewportClassName="[&>div]:!block [&>div]:!min-w-0 [&>div]:w-full"
       >
         <ChatScrollContext.Provider value={scrollContextValue}>
-          <div className="mx-auto flex w-full max-w-4xl min-w-0 flex-col gap-1 px-3 py-5 sm:px-6 sm:py-6">
+          <div data-conversation-messages="true" className="flex min-w-0 flex-col gap-1">
             <div
               className="relative w-full"
               style={{ height: `${virtualListSize}px` }}
@@ -425,13 +456,7 @@ export function MessageList({
                 // 系统消息：作为分隔条
                 if (message.type === 'system') {
                   rowContent = (
-                    <div className="flex items-center gap-3">
-                      <div className="bg-border/60 h-px flex-1" />
-                      <span className="text-muted-foreground bg-card/70 rounded-full border px-3 py-0.5 text-[11px]">
-                        {message.content}
-                      </span>
-                      <div className="bg-border/60 h-px flex-1" />
-                    </div>
+                    <MessageNotice>{message.content}</MessageNotice>
                   )
                 } else if (message.type === 'error') {
                   // 错误消息
@@ -448,48 +473,10 @@ export function MessageList({
                   const senderName = message.sender?.name || (isUser ? userName : botDisplayName)
                   spacingClass = index === 0 ? 'pb-0.5' : sameGroup ? 'py-0.5' : 'pt-3 pb-0.5'
                   rowContent = (
-                    <div
-                      className={cn(
-                        'chat-message-row flex w-full min-w-0 items-end gap-2 sm:gap-3',
-                        isUser ? 'flex-row-reverse' : 'flex-row'
-                      )}
-                    >
-                      <BubbleAvatar
-                        type={bubbleType}
-                        visible={!sameGroup}
-                        imageUrl={bubbleType === 'bot' ? botAvatarUrl : userAvatarUrl}
-                      />
-
-                      <div
-                        className={cn(
-                          'flex max-w-[80%] min-w-0 flex-col sm:max-w-[70%]',
-                          isUser ? 'items-end' : 'items-start'
-                        )}
-                      >
-                        {!sameGroup && (
-                          <div
-                            className={cn(
-                              'text-muted-foreground mb-1 flex items-center gap-2 px-1 text-[11px]',
-                              isUser && 'flex-row-reverse'
-                            )}
-                          >
-                            <span className="hidden font-medium sm:inline">{senderName}</span>
-                            <span>{formatTime(message.timestamp)}</span>
-                          </div>
-                        )}
-
-                        <div
-                          className={cn(
-                            'max-w-full min-w-0 overflow-hidden px-3.5 py-2 text-sm leading-relaxed wrap-break-word shadow-sm/30',
-                            isUser
-                              ? 'bg-primary text-primary-foreground rounded-2xl rounded-br-md'
-                              : 'bg-muted text-foreground rounded-2xl rounded-bl-md'
-                          )}
-                        >
-                          <RenderMessageContent message={message} />
-                        </div>
-                      </div>
-                    </div>
+                    <MessageBubble name={senderName} time={formatTime(message.timestamp)} outgoing={isUser} showMeta={!sameGroup}
+                      avatar={!sameGroup && <ConversationAvatar name={senderName} bot={!isUser} src={bubbleType === 'bot' ? botAvatarUrl : userAvatarUrl} />}>
+                      <RenderMessageContent message={message} />
+                    </MessageBubble>
                   )
                 }
 
@@ -541,6 +528,7 @@ export function MessageList({
           </div>
         </ChatScrollContext.Provider>
       </ScrollArea>
-    </div>
+    </DataPanel>
+    </ImageGalleryProvider>
   )
 }

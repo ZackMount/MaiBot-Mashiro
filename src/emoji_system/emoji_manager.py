@@ -1,5 +1,6 @@
 from datetime import datetime
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Literal, Optional
 
 import asyncio
@@ -12,6 +13,7 @@ from rapidfuzz.distance import Levenshtein
 from rich.traceback import install
 from sqlmodel import select
 
+from src.common.paths import get_instance_root
 from src.common.data_models.image_data_model import MaiEmoji
 from src.common.database.database import get_db_session, get_db_session_manual
 from src.common.database.database_model import Images, ImageType
@@ -28,7 +30,7 @@ logger = get_logger("emoji")
 
 install(extra_lines=3)
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = get_instance_root()
 DATA_DIR = PROJECT_ROOT / "data"
 EmojiRegisterStatus = Literal["registered", "skipped", "failed"]
 EMOJI_DIR = DATA_DIR / "emoji"  # 表情包存储目录
@@ -259,7 +261,6 @@ def _is_collected_emoji_size_allowed(size_bytes: int) -> bool:
 
 
 emoji_manager_vlm = LLMServiceClient(task_name="vlm", request_type="emoji.see")
-emoji_manager_emotion_judge_llm = LLMServiceClient(task_name="utils", request_type="emoji")
 
 
 class EmojiManager:
@@ -516,20 +517,22 @@ class EmojiManager:
         Raises:
             Exception: 如果加载过程中发生不可恢复错误，则抛出异常
         """
-        logger.debug("[数据库] 开始加载所有表情包记录...")
+        started_at = perf_counter()
+        logger.debug("[数据库] 开始加载已注册且未禁用的表情包记录...")
         try:
             with get_db_session() as session:
-                statement = select(Images)
+                # 在数据库中筛选，避免为普通图片和未启用表情构造 ORM 对象。
+                # 保留 no_file_flag 记录，让下方清理逻辑继续移除破损注册记录。
+                statement = select(Images).filter_by(
+                    image_type=ImageType.EMOJI,
+                    is_registered=True,
+                    is_banned=False,
+                )
                 results = session.exec(statement).all()
+                query_finished_at = perf_counter()
                 self.emojis = []
                 removed_record_count = 0
                 for record in results:
-                    if record.image_type != ImageType.EMOJI:
-                        continue
-                    if not record.is_registered:
-                        continue
-                    if record.is_banned:
-                        continue
                     try:
                         if record.no_file_flag or _resolve_existing_emoji_path(record.full_path) is None:
                             logger.warning(
@@ -549,10 +552,17 @@ class EmojiManager:
                         session.delete(record)
                         removed_record_count += 1
                 self._emoji_num = len(self.emojis)
-                logger.info(
-                    f"[数据库] 成功加载 {self._emoji_num} 个已注册表情包，"
-                    f"清理破损注册记录 {removed_record_count} 条"
-                )
+                records_finished_at = perf_counter()
+            # 查询阶段包含获取会话；退出上下文后再记录成功，计入提交和关闭会话的耗时。
+            finished_at = perf_counter()
+            logger.info(
+                f"[数据库] 成功加载 {self._emoji_num} 个已注册表情包，"
+                f"清理破损注册记录 {removed_record_count} 条，候选记录={len(results)}，"
+                f"查询={query_finished_at - started_at:.3f}s，"
+                f"校验构建={records_finished_at - query_finished_at:.3f}s，"
+                f"事务收尾={finished_at - records_finished_at:.3f}s，"
+                f"总耗时={finished_at - started_at:.3f}s"
+            )
         except Exception as e:
             logger.critical(f"[数据库] 加载表情包记录时发生不可恢复错误: {e}")
             self.emojis = []
@@ -899,7 +909,11 @@ class EmojiManager:
         emoji_replace_prompt_template.add_context("description", new_emoji.description or "无描述")
         emoji_replace_prompt = await prompt_manager.render_prompt(emoji_replace_prompt_template)
 
-        decision_result = await emoji_manager_emotion_judge_llm.generate_response(
+        # 替换决策只使用文字描述，优先使用 emoji 任务，未配置时使用 planner。
+        emoji_models = config_manager.get_model_config().model_task_config.emoji.model_list
+        replacement_task_name = "emoji" if any(model_name.strip() for model_name in emoji_models) else "planner"
+        replacement_client = LLMServiceClient(task_name=replacement_task_name, request_type="emoji")
+        decision_result = await replacement_client.generate_response(
             emoji_replace_prompt,
             session_id=session_id,
         )
@@ -1149,7 +1163,7 @@ class EmojiManager:
             _ensure_directories()
             if global_config.emoji.steal_emoji and (
                 self._emoji_num < global_config.emoji.max_reg_num
-                or (self._emoji_num > global_config.emoji.max_reg_num and global_config.emoji.do_replace)
+                or (self._emoji_num >= global_config.emoji.max_reg_num and global_config.emoji.do_replace)
             ):
                 known_paths: set[Path] = set()
                 with get_db_session() as session:
@@ -1183,6 +1197,8 @@ class EmojiManager:
                         logger.debug(f"[emoji_maintenance] Emoji already registered, keep file: {emoji_file.name}")
                     else:
                         logger.debug(f"[emoji_maintenance] Emoji not registered, keep file: {emoji_file.name}")
+                    # 拒绝替换或处理失败也结束本轮，避免积压文件连续触发模型请求。
+                    break
 
             try:
                 await asyncio.to_thread(self.check_emoji_file_integrity)
@@ -1253,6 +1269,8 @@ class EmojiManager:
             return "failed"
 
         if self._emoji_num >= global_config.emoji.max_reg_num and global_config.emoji.do_replace:
+            # 已有描述的候选也需要记录处理状态，避免拒绝替换后被维护任务反复选中。
+            await asyncio.to_thread(self._mark_emoji_vlm_processed, target_emoji)
             logger.warning(
                 f"[register_emoji] Emoji limit {global_config.emoji.max_reg_num} reached, trying replacement"
             )

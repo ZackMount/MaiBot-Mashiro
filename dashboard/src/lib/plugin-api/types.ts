@@ -24,7 +24,7 @@ export interface MaimaiVersion {
  * 已安装插件信息
  */
 export interface InstalledPlugin {
-  release?: { version: string; commit: string; pinned: boolean } | null
+  release?: { version: string; commit: string } | null
   id: string
   manifest: {
     manifest_version: number
@@ -51,10 +51,12 @@ export interface InstalledPlugin {
   }
   path: string
   changelog?: string | null
-  enabled?: boolean
+  enabled?: boolean | null
   disabled?: boolean
   loaded?: boolean
-  load_status?: 'success' | 'failed' | 'inactive' | 'disabled' | 'offline' | 'unknown' | 'loading'
+  /** 后端累计的实际运行秒数，不含禁用或停机时间。 */
+  usage_seconds?: number
+  load_status?: 'success' | 'failed' | 'inactive' | 'disabled' | 'offline' | 'unknown' | 'loading' | 'stopping' | 'not_loaded' | 'stopped'
   load_error?: string
   circuit_status?: {
     state: 'open' | 'half_open'
@@ -62,14 +64,6 @@ export interface InstalledPlugin {
     cooldown_level: number
     half_open_inflight: boolean
   } | null
-}
-/**
- * 旧版本插件格式(直接包含 version 字段)
- */
-export interface LegacyInstalledPlugin {
-  id: string
-  version: string
-  path: string
 }
 
 export interface RuntimeCommand {
@@ -199,7 +193,29 @@ export interface ConfigLayoutSchema {
 /**
  * 插件配置 Schema
  */
+export interface ConfigWidget {
+  id: string
+  kind: 'qrcode' | 'status' | 'action'
+  label: string
+  confirmation?: string | null
+}
+
+export interface ConfigWidgetState {
+  text: string
+  tone: 'neutral' | 'success' | 'warning' | 'error'
+  image?: string | null
+  expires_at?: number | null
+  visible: boolean
+  disabled: boolean
+}
+
+export interface ConfigWidgetSnapshot {
+  widgets: ConfigWidget[]
+  states: Record<string, ConfigWidgetState>
+}
+
 export interface PluginConfigSchema {
+  runtime_widgets?: ConfigWidget[]
   plugin_id: string
   plugin_info: {
     name: string
@@ -217,9 +233,10 @@ export interface PluginConfigSchema {
  * 插件配置页初始化数据
  */
 export interface PluginConfigBundle {
-  schema: PluginConfigSchema
+  schema: PluginConfigSchema | null
   config: Record<string, unknown>
   rawConfig: string
+  configError?: string
   message?: string
 }
 

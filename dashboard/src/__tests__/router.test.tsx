@@ -43,16 +43,13 @@ vi.mock('@/routes/logs', () => ({
   ReasoningLogViewerPage: StubPage,
   StatisticsLogViewerPage: StubPage,
 }))
-vi.mock('@/routes/reply-effects', () => ({ ReplyEffectsPage: StubPage }))
 vi.mock('@/routes/config/bot', () => ({ BotConfigPage: StubPage }))
 vi.mock('@/routes/config/model', () => ({ ModelConfigPage: StubPage }))
 vi.mock('@/routes/config/prompts', () => ({ PromptManagementPage: StubPage }))
-vi.mock('@/routes/prompt-generator', () => ({ PromptGeneratorPage: StubPage }))
-vi.mock('@/routes/resource/emoji/index.tsx', () => ({ EmojiManagementPage: StubPage }))
+vi.mock('@/routes/resource/learning', () => ({ LearningPage: StubPage }))
 vi.mock('@/routes/resource/expression/index.tsx', () => ({ ExpressionManagementPage: StubPage }))
 vi.mock('@/routes/person', () => ({ PersonManagementPage: StubPage }))
 vi.mock('@/routes/resource/jargon/index.tsx', () => ({ JargonManagementPage: StubPage }))
-vi.mock('@/routes/resource/behavior/index.tsx', () => ({ BehaviorLearningPage: StubPage }))
 vi.mock('@/routes/resource/knowledge-graph/index.tsx', () => ({ KnowledgeGraphPage: StubPage }))
 vi.mock('@/routes/resource/knowledge-base', () => ({ KnowledgeBasePage: StubPage }))
 vi.mock('@/routes/monitor/index.tsx', () => ({ PlannerMonitorPage: StubPage }))
@@ -84,15 +81,13 @@ const expectedPaths = [
   '/plugin-mirrors/embed',
   '/',
   '/statistics',
-  '/reply-effects',
   '/config/bot',
   '/config/model',
   '/config/prompts',
-  '/config/prompt-generator',
   '/resource/emoji',
+  '/resource/learning',
   '/resource/expression',
   '/resource/jargon',
-  '/resource/behavior',
   '/resource/person',
   '/resource/knowledge-graph',
   '/resource/knowledge-base',
@@ -192,7 +187,15 @@ describe('router 路由表', () => {
       { options: { component?: unknown } } | undefined
     >
     for (const path of expectedPaths.filter(
-      (path) => !['/mcp-settings', '/settings', '/extensions'].includes(path)
+      (path) =>
+        ![
+          '/mcp-settings',
+          '/settings',
+          '/extensions',
+          '/resource/emoji',
+          '/resource/expression',
+          '/resource/jargon',
+        ].includes(path)
     )) {
       const route = routesByPath[path]
       expect(route, `routesByPath 缺少 ${path}`).toBeDefined()
@@ -218,30 +221,10 @@ describe('router 路由表', () => {
     }
   })
 
-  it.each([
-    { searchStr: '?tab=security', hash: '#other', href: '/config/bot?tab=security&mode=webui' },
-    { searchStr: '', hash: '#other', href: '/config/bot?mode=webui&tab=other' },
-    { searchStr: '', hash: '', href: '/config/bot?mode=webui' },
-  ])('旧设置书签跳转内嵌 WebUI 设置：$href', ({ searchStr, hash, href }) => {
-    const beforeLoad = getRoutesByPath()['/settings']?.options.beforeLoad as (ctx: {
-      location: { searchStr: string; hash: string }
-    }) => void
-    expect(typeof beforeLoad).toBe('function')
-    try {
-      beforeLoad({ location: { searchStr, hash } })
-      throw new Error('预期跳转 WebUI 设置')
-    } catch (error) {
-      expect(isRedirect(error)).toBe(true)
-      if (isRedirect(error)) expect(error.options).toMatchObject({ href, replace: true })
-    }
-  })
-
-  it('registeredRoutePaths 现状为空集合（特征化已知缺陷）', () => {
-    // 现状缺陷：registeredRoutePaths 在 createRouter 初始化 fullPath 之前采集，
-    // 采集时各路由的 fullPath 均为 undefined，因此集合恒为空。
-    // search-dialog 依赖该集合过滤菜单路由，当前会把所有路由项过滤掉。
-    // 此测试锁定现状，修复源码后应同步更新为断言完整路径集合。
-    expect(registeredRoutePaths.size).toBe(0)
+  it('registeredRoutePaths 包含初始化后的完整路由路径', () => {
+    // 搜索依赖完整路径过滤菜单，必须在 createRouter 初始化 fullPath 后采集。
+    expect(registeredRoutePaths).toEqual(new Set(Object.keys(router.routesByPath)))
+    expect(registeredRoutePaths.has('/config/bot')).toBe(true)
   })
 
   it('配置模板详情路由导出且路径带 packId 参数', () => {
@@ -365,7 +348,15 @@ describe('router 路由表', () => {
   it('所有懒加载页面工厂均可 preload 到桩组件', async () => {
     const routesByPath = getRoutesByPath()
     for (const path of expectedPaths.filter(
-      (path) => !['/mcp-settings', '/settings', '/extensions'].includes(path)
+      (path) =>
+        ![
+          '/mcp-settings',
+          '/settings',
+          '/extensions',
+          '/resource/emoji',
+          '/resource/expression',
+          '/resource/jargon',
+        ].includes(path)
     )) {
       const component = routesByPath[path]?.options.component as LazyRouteComponent | undefined
       expect(typeof component, `${path} 缺少组件`).toBe('function')

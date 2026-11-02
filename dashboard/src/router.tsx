@@ -11,6 +11,8 @@ import { Layout } from './components/layout'
 import { RoutePendingFallback } from './components/route-pending-fallback'
 import { checkAuth } from './hooks/use-auth'
 import { RouteErrorBoundary } from './components/error-boundary'
+import { rememberMarketInstall } from './lib/plugin-market-navigation'
+import { rememberPersonalityImport } from './lib/personality-import'
 
 // Root 路由
 const rootRoute = createRootRoute({
@@ -84,16 +86,23 @@ const statisticsRoute = createRoute({
   component: lazyRouteComponent(() => import('./routes/logs'), 'StatisticsLogViewerPage'),
 })
 
-const replyEffectsRoute = createRoute({
-  getParentRoute: () => protectedRoute,
-  path: '/reply-effects',
-  component: lazyRouteComponent(() => import('./routes/reply-effects'), 'ReplyEffectsPage'),
-})
 
 // 配置路由 - 麦麦主程序配置
 const botConfigRoute = createRoute({
   getParentRoute: () => protectedRoute,
   path: '/config/bot',
+  beforeLoad: ({ location }) => {
+    if (rememberPersonalityImport(location.hash)) {
+      throw redirect({ href: '/config/bot?tab=bot', replace: true })
+    }
+    const params = new URLSearchParams(location.searchStr)
+    if (params.get('mode') !== 'webui') return
+    params.delete('mode')
+    const search = params.size ? `?${params.toString()}` : ''
+    // 兼容此前内嵌 WebUI 设置的链接，保留页签参数和 hash。
+    const hash = location.hash ? `#${location.hash.replace(/^#/, '')}` : ''
+    throw redirect({ href: `/settings${search}${hash}`, replace: true })
+  },
   component: lazyRouteComponent(() => import('./routes/config/bot'), 'BotConfigPage'),
 })
 
@@ -111,31 +120,32 @@ const promptManagementRoute = createRoute({
   component: lazyRouteComponent(() => import('./routes/config/prompts'), 'PromptManagementPage'),
 })
 
-// 配置路由 - 人设生成器（测试功能）
-const promptGeneratorRoute = createRoute({
-  getParentRoute: () => protectedRoute,
-  path: '/config/prompt-generator',
-  component: lazyRouteComponent(() => import('./routes/prompt-generator'), 'PromptGeneratorPage'),
-})
-
-// 资源管理路由 - 表情包管理
+// 旧表情包地址进入学习页的表情包页签。
 const emojiManagementRoute = createRoute({
   getParentRoute: () => protectedRoute,
   path: '/resource/emoji',
-  component: lazyRouteComponent(
-    () => import('./routes/resource/emoji/index.tsx'),
-    'EmojiManagementPage'
-  ),
+  beforeLoad: () => {
+    throw redirect({ to: '/resource/learning', search: { tab: 'emoji' }, replace: true })
+  },
 })
 
-// 资源管理路由 - 表达方式管理
+// 资源管理路由 - 学习（表达方式、黑话与表情包）
+const learningRoute = createRoute({
+  getParentRoute: () => protectedRoute,
+  path: '/resource/learning',
+  validateSearch: (search: Record<string, unknown>): { tab: 'expression' | 'jargon' | 'emoji' } => ({
+    tab: search.tab === 'jargon' || search.tab === 'emoji' ? search.tab : 'expression',
+  }),
+  component: lazyRouteComponent(() => import('./routes/resource/learning'), 'LearningPage'),
+})
+
+// 旧表达方式地址进入学习页的表达页签。
 const expressionManagementRoute = createRoute({
   getParentRoute: () => protectedRoute,
   path: '/resource/expression',
-  component: lazyRouteComponent(
-    () => import('./routes/resource/expression/index.tsx'),
-    'ExpressionManagementPage'
-  ),
+  beforeLoad: () => {
+    throw redirect({ to: '/resource/learning', search: { tab: 'expression' }, replace: true })
+  },
 })
 
 // 资源管理路由 - 人物信息管理
@@ -145,25 +155,16 @@ const personManagementRoute = createRoute({
   component: lazyRouteComponent(() => import('./routes/person'), 'PersonManagementPage'),
 })
 
-// 资源管理路由 - 黑话管理
+// 旧黑话地址进入学习页的黑话页签。
 const jargonManagementRoute = createRoute({
   getParentRoute: () => protectedRoute,
   path: '/resource/jargon',
-  component: lazyRouteComponent(
-    () => import('./routes/resource/jargon/index.tsx'),
-    'JargonManagementPage'
-  ),
+  beforeLoad: () => {
+    throw redirect({ to: '/resource/learning', search: { tab: 'jargon' }, replace: true })
+  },
 })
 
 // 资源管理路由 - 知识库图谱可视化
-const behaviorLearningRoute = createRoute({
-  getParentRoute: () => protectedRoute,
-  path: '/resource/behavior',
-  component: lazyRouteComponent(
-    () => import('./routes/resource/behavior/index.tsx'),
-    'BehaviorLearningPage'
-  ),
-})
 
 const knowledgeGraphRoute = createRoute({
   getParentRoute: () => protectedRoute,
@@ -204,10 +205,44 @@ const plannerMonitorRoute = createRoute({
   component: lazyRouteComponent(() => import('./routes/monitor/index.tsx'), 'PlannerMonitorPage'),
 })
 
+const computerRoute = createRoute({
+  getParentRoute: () => protectedRoute,
+  path: '/computer',
+  component: lazyRouteComponent(() => import('./routes/computer'), 'ComputerPage'),
+})
+
+const filesRoute = createRoute({
+  getParentRoute: () => protectedRoute,
+  path: '/files',
+  beforeLoad: () => {
+    throw redirect({ to: '/data-transfer', search: { tab: 'files' }, replace: true })
+  },
+})
+
+const agentRoute = createRoute({
+  getParentRoute: () => protectedRoute,
+  path: '/agent',
+  beforeLoad: () => {
+    throw redirect({ to: '/chat', search: { agent: true }, replace: true })
+  },
+})
+
+// 移动端管理页路由：底部标签栏「管理」，汇总侧栏的全部入口
+const manageRoute = createRoute({
+  getParentRoute: () => protectedRoute,
+  path: '/manage',
+  component: lazyRouteComponent(() => import('./routes/manage'), 'ManagePage'),
+})
+
 // 本地聊天室路由
 const chatRoute = createRoute({
   getParentRoute: () => protectedRoute,
   path: '/chat',
+  validateSearch: (search: Record<string, unknown>): { setupTrial?: boolean; observe?: string; agent?: boolean } => ({
+    agent: search.agent === true || search.agent === 'true' ? true : undefined,
+    setupTrial: search.setupTrial === true || search.setupTrial === 'true' ? true : undefined,
+    observe: typeof search.observe === 'string' && search.observe ? search.observe : undefined,
+  }),
   component: lazyRouteComponent(() => import('./routes/chat/index'), 'ChatPage'),
 })
 
@@ -229,6 +264,9 @@ const chatEmbedRoute = createRoute({
 const pluginsEmbedRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/plugins/embed',
+  validateSearch: (search: Record<string, unknown>): { pluginId?: string } => ({
+    pluginId: typeof search.pluginId === 'string' ? search.pluginId.trim() || undefined : undefined,
+  }),
   component: lazyRouteComponent(
     () => import('./routes/plugins/embed'),
     'PluginMarketplaceEmbedPage'
@@ -239,6 +277,12 @@ const pluginsEmbedRoute = createRoute({
 const pluginsRoute = createRoute({
   getParentRoute: () => protectedRoute,
   path: '/plugins',
+  beforeLoad: ({ search }) => { rememberMarketInstall(search) },
+  validateSearch: (search: Record<string, unknown>): { pluginId?: string; installPluginId?: string; installVersion?: string } => ({
+    pluginId: typeof search.pluginId === 'string' ? search.pluginId.trim() || undefined : undefined,
+    installPluginId: typeof search.installPluginId === 'string' && /^[\p{L}\p{N}_.-]{1,256}$/u.test(search.installPluginId) ? search.installPluginId : undefined,
+    installVersion: typeof search.installVersion === 'string' && /^[\w.+-]{1,80}$/.test(search.installVersion) ? search.installVersion : undefined,
+  }),
   component: lazyRouteComponent(
     () => import('./routes/plugins/PluginMarketplacePage'),
     'PluginMarketplacePage'
@@ -302,25 +346,20 @@ const mcpSettingsRoute = createRoute({
   },
 })
 
-// 数据迁移与备份路由
+// 数据管理：迁移备份与文件管理共用入口。
 const dataTransferRoute = createRoute({
   getParentRoute: () => protectedRoute,
   path: '/data-transfer',
+  validateSearch: (search: Record<string, unknown>): { tab?: 'transfer' | 'files' } => ({
+    tab: search.tab === 'files' ? 'files' : undefined,
+  }),
   component: lazyRouteComponent(() => import('./routes/data-transfer'), 'DataTransferPage'),
 })
 
 const settingsRoute = createRoute({
   getParentRoute: () => protectedRoute,
   path: '/settings',
-  beforeLoad: ({ location }) => {
-    const params = new URLSearchParams(location.searchStr)
-    params.set('mode', 'webui')
-    // 兼容旧书签中的页签参数和 hash。
-    if (!params.has('tab') && location.hash) {
-      params.set('tab', location.hash.replace(/^#/, ''))
-    }
-    throw redirect({ href: `/config/bot?${params.toString()}`, replace: true })
-  },
+  component: lazyRouteComponent(() => import('./routes/settings/index.tsx'), 'SettingsPage'),
 })
 
 // 配置模板市场路由
@@ -377,15 +416,13 @@ const routeTree = rootRoute.addChildren([
     pluginWebUIManagerRoute,
     indexRoute,
     statisticsRoute,
-    replyEffectsRoute,
     botConfigRoute,
     modelConfigRoute,
     promptManagementRoute,
-    promptGeneratorRoute,
     emojiManagementRoute,
+    learningRoute,
     expressionManagementRoute,
     jargonManagementRoute,
-    behaviorLearningRoute,
     personManagementRoute,
     knowledgeGraphRoute,
     knowledgeBaseRoute,
@@ -399,8 +436,12 @@ const routeTree = rootRoute.addChildren([
     logsRoute,
     reasoningProcessRoute,
     plannerMonitorRoute,
+    agentRoute,
+    computerRoute,
+    filesRoute,
     chatManagementRoute,
     chatRoute,
+    manageRoute,
     settingsRoute,
     packMarketRoute,
     packDetailRoute,
@@ -421,8 +462,6 @@ function collectRoutePaths(node: RouteNode): string[] {
   return [...currentPath, ...childPaths]
 }
 
-export const registeredRoutePaths = new Set(collectRoutePaths(routeTree as RouteNode))
-
 // 创建路由器
 export const router = createRouter({
   routeTree,
@@ -434,6 +473,9 @@ export const router = createRouter({
   defaultPreload: 'intent',
   defaultPreloadDelay: 80,
 })
+
+// createRouter 初始化后才有 fullPath，搜索索引必须在此时采集已注册路径。
+export const registeredRoutePaths = new Set(collectRoutePaths(routeTree as RouteNode))
 
 // 类型声明
 declare module '@tanstack/react-router' {

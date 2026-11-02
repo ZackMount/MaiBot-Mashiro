@@ -1,7 +1,8 @@
-import { ExternalLink, Newspaper, Pin, RefreshCw } from 'lucide-react'
-import { useState } from 'react'
+import { Link } from '@tanstack/react-router'
+import { ExternalLink, Newspaper, Package, Pin, RefreshCw } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import {
@@ -18,9 +19,16 @@ import { Skeleton } from '@/components/ui/skeleton'
 import type { NewsItem } from '@/lib/news-api'
 import { cn } from '@/lib/utils'
 
-import { useNews } from './hooks/useNews'
+import type { useNews } from './hooks/useNews'
+import type { useNewsReadState } from './hooks/useNewsReadState'
 
 const RELATIVE_TIME_DAY_THRESHOLD = 30
+
+/** 资讯相关链接可使用站内插件地址，不依赖用户部署 WebUI 的域名。 */
+function getNewsPluginId(url: string): string | null {
+  if (!url.startsWith('/plugins?')) return null
+  return new URLSearchParams(url.slice('/plugins?'.length)).get('pluginId')?.trim() || null
+}
 
 /** 资讯发布时间相对当前时间的展示（如「2小时前」），超过 30 天回退为日期。 */
 function formatRelativeTime(value: string, locale: string): string {
@@ -45,15 +53,24 @@ function NewsRow({
   locale,
   openLabel,
   pinnedLabel,
+  pluginLabel,
+  unreadLabel,
+  unread,
+  onRead,
   onOpen,
 }: {
   item: NewsItem
   locale: string
   openLabel: string
   pinnedLabel: string
+  pluginLabel: string
+  unreadLabel: string
+  unread: boolean
+  onRead: () => void
   onOpen: () => void
 }) {
   const hasLink = item.url.trim().length > 0
+  const pluginId = getNewsPluginId(item.url)
 
   return (
     <div
@@ -70,11 +87,34 @@ function NewsRow({
       }}
     >
       <div className="flex items-start gap-2">
+        {unread && (
+          <span
+            className="bg-primary mt-1.5 h-1.5 w-1.5 shrink-0 rounded-sm"
+            role="img"
+            aria-label={unreadLabel}
+            title={unreadLabel}
+          />
+        )}
         {item.pinned && (
           <Pin className="text-primary mt-0.5 h-3.5 w-3.5 shrink-0" aria-label={pinnedLabel} />
         )}
         <span className="min-w-0 flex-1 text-sm font-medium">{item.title}</span>
-        {hasLink && (
+        {pluginId ? (
+          <Link
+            to="/plugins"
+            search={{ pluginId }}
+            title={pluginLabel}
+            aria-label={pluginLabel}
+            className="text-muted-foreground hover:text-foreground shrink-0"
+            onClick={(event) => {
+              event.stopPropagation()
+              onRead()
+            }}
+            onKeyDown={(event) => event.stopPropagation()}
+          >
+            <Package className="h-3.5 w-3.5" />
+          </Link>
+        ) : hasLink && (
           <a
             href={item.url}
             target="_blank"
@@ -82,7 +122,11 @@ function NewsRow({
             title={openLabel}
             aria-label={openLabel}
             className="text-muted-foreground hover:text-foreground shrink-0"
-            onClick={(event) => event.stopPropagation()}
+            onClick={(event) => {
+              event.stopPropagation()
+              onRead()
+            }}
+            onKeyDown={(event) => event.stopPropagation()}
           >
             <ExternalLink className="h-3.5 w-3.5" />
           </a>
@@ -103,19 +147,28 @@ function NewsRow({
   )
 }
 
-export function NewsCard() {
+export function NewsCard({ newsState, readState, onOpen }: {
+  newsState: ReturnType<typeof useNews>
+  readState: ReturnType<typeof useNewsReadState>
+  onOpen: (item: NewsItem) => void
+}) {
   const { t, i18n } = useTranslation()
-  const { news, isNewsLoading, newsError, fetchNews } = useNews()
-  const [selectedNews, setSelectedNews] = useState<NewsItem | null>(null)
+  const { news, isNewsLoading, newsError, fetchNews } = newsState
+  const { isUnread, markRead } = readState
   const locale = i18n.resolvedLanguage || i18n.language
+  const unreadCount = news?.filter(isUnread).length || 0
 
   return (
-    <>
       <Card className="flex h-full min-h-0 flex-col">
         <CardHeader className="flex flex-row items-center justify-between gap-2 pb-3">
           <CardTitle className="flex items-center gap-2 text-sm font-medium">
             <Newspaper className="h-4 w-4" />
             {t('home.news.title')}
+            {unreadCount > 0 && (
+              <Badge className="shrink-0 px-1.5 py-0 text-[10px] leading-4 tabular-nums">
+                {t('home.news.unreadCount', { count: unreadCount })}
+              </Badge>
+            )}
           </CardTitle>
           <Button
             variant="ghost"
@@ -157,7 +210,11 @@ export function NewsCard() {
                     locale={locale}
                     openLabel={t('home.news.open')}
                     pinnedLabel={t('home.news.pinned')}
-                    onOpen={() => setSelectedNews(item)}
+                    pluginLabel={t('home.news.openPlugin')}
+                    unreadLabel={t('home.news.unread')}
+                    unread={isUnread(item)}
+                    onRead={() => markRead(item)}
+                    onOpen={() => onOpen(item)}
                   />
                 ))}
               </div>
@@ -169,36 +226,54 @@ export function NewsCard() {
           )}
         </CardContent>
       </Card>
+  )
+}
 
-      <Dialog open={selectedNews !== null} onOpenChange={(open) => !open && setSelectedNews(null)}>
-        <DialogContent className="[--dialog-width:48rem]">
-          {selectedNews && (
-            <>
-              <DialogHeader>
-                <DialogTitle className="pr-6">{selectedNews.title}</DialogTitle>
-                <DialogDescription>
-                  {[selectedNews.pinned ? t('home.news.pinned') : '', selectedNews.source, formatRelativeTime(selectedNews.published_at, locale)]
-                    .filter(Boolean)
-                    .join(' · ')}
-                </DialogDescription>
-              </DialogHeader>
-              <DialogBody>
-                <MarkdownRenderer content={selectedNews.content || selectedNews.summary} />
-              </DialogBody>
-              {selectedNews.url && (
-                <div className="flex justify-end">
-                  <Button asChild variant="outline" size="sm">
+export function NewsDialog({ selectedNews, onClose }: { selectedNews: NewsItem | null; onClose: () => void }) {
+  const { t, i18n } = useTranslation()
+  const locale = i18n.resolvedLanguage || i18n.language
+  const selectedPluginId = selectedNews ? getNewsPluginId(selectedNews.url) : null
+
+  return (
+    <Dialog open={selectedNews !== null} onOpenChange={(open) => !open && onClose()}>
+      <DialogContent className="[--dialog-width:48rem]">
+        {selectedNews && (
+          <>
+            <DialogHeader>
+              <DialogTitle className="pr-6">{selectedNews.title}</DialogTitle>
+              <DialogDescription>
+                {[selectedNews.pinned ? t('home.news.pinned') : '', selectedNews.source, formatRelativeTime(selectedNews.published_at, locale)]
+                  .filter(Boolean)
+                  .join(' · ')}
+              </DialogDescription>
+            </DialogHeader>
+            <DialogBody>
+              <MarkdownRenderer content={selectedNews.content || selectedNews.summary} />
+            </DialogBody>
+            {selectedNews.url && (
+              <div className="flex justify-end">
+                <Button asChild variant="outline" size="sm">
+                  {selectedPluginId ? (
+                    <Link
+                      to="/plugins"
+                      search={{ pluginId: selectedPluginId }}
+                      onClick={onClose}
+                    >
+                      <Package className="mr-2 h-4 w-4" />
+                      {t('home.news.openPlugin')}
+                    </Link>
+                  ) : (
                     <a href={selectedNews.url} target="_blank" rel="noopener noreferrer">
                       <ExternalLink className="mr-2 h-4 w-4" />
                       {t('home.news.openLink')}
                     </a>
-                  </Button>
-                </div>
-              )}
-            </>
-          )}
-        </DialogContent>
-      </Dialog>
-    </>
+                  )}
+                </Button>
+              </div>
+            )}
+          </>
+        )}
+      </DialogContent>
+    </Dialog>
   )
 }

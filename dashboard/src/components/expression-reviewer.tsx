@@ -1,3 +1,4 @@
+import { DataPagination } from '@/components/ui/data-pagination'
 /**
  * 表达方式审核器弹窗组件
  *
@@ -27,20 +28,6 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { ThinkingIllustration } from '@/components/ui/thinking-illustration'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
-import {
-  Pagination,
-  PaginationContent,
-  PaginationEllipsis,
-  PaginationItem,
-  PaginationLink,
-} from '@/components/ui/pagination'
 import { useToast } from '@/hooks/use-toast'
 import {
   CheckCircle2,
@@ -48,8 +35,6 @@ import {
   Clock,
   Search,
   RefreshCw,
-  ChevronLeft,
-  ChevronRight,
   User,
   AlertCircle,
   List,
@@ -121,7 +106,6 @@ export function ExpressionReviewer({
   const [total, setTotal] = useState(0)
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(20)
-  const [jumpPage, setJumpPage] = useState('')
   const [filterType, setFilterType] = useState<'unchecked' | 'passed' | 'all'>('unchecked')
   const [search, setSearch] = useState('')
   const [searchInput, setSearchInput] = useState('')
@@ -754,53 +738,6 @@ export function ExpressionReviewer({
     return null
   }
 
-  const totalPages = Math.ceil(total / pageSize)
-
-  // 生成页码数组
-  const getPageNumbers = () => {
-    const pages: (number | 'ellipsis')[] = []
-    if (totalPages <= 7) {
-      // 总页数不多，全部显示
-      for (let i = 1; i <= totalPages; i++) {
-        pages.push(i)
-      }
-    } else {
-      // 总是显示第一页
-      pages.push(1)
-
-      if (page > 3) {
-        pages.push('ellipsis')
-      }
-
-      // 当前页附近的页码
-      const start = Math.max(2, page - 1)
-      const end = Math.min(totalPages - 1, page + 1)
-
-      for (let i = start; i <= end; i++) {
-        pages.push(i)
-      }
-
-      if (page < totalPages - 2) {
-        pages.push('ellipsis')
-      }
-
-      // 总是显示最后一页
-      if (totalPages > 1) {
-        pages.push(totalPages)
-      }
-    }
-    return pages
-  }
-
-  // 处理页码跳转
-  const handleJumpPage = () => {
-    const targetPage = parseInt(jumpPage, 10)
-    if (!isNaN(targetPage) && targetPage >= 1 && targetPage <= totalPages) {
-      setPage(targetPage)
-      setJumpPage('')
-    }
-  }
-
   const renderListHeaderTitle = () => {
     if (embedded) {
       return null
@@ -828,6 +765,8 @@ export function ExpressionReviewer({
       className={cn(
         'flex min-h-0 flex-col overflow-hidden',
         embedded ? 'bg-card h-full rounded-lg border' : 'h-full',
+        // 手机上嵌入页面时直接铺在页面上，不再套一层卡片框
+        embedded && 'max-lg:rounded-none max-lg:border-0 max-lg:bg-transparent',
         className
       )}
     >
@@ -1204,106 +1143,10 @@ export function ExpressionReviewer({
             )}
           </ScrollArea>
 
-          {/* 分页 */}
-          <div className="flex shrink-0 flex-col items-center justify-between gap-3 border-t px-4 py-3 sm:flex-row sm:px-6">
-            {/* 左侧：每页显示数量 */}
-            <div className="text-muted-foreground flex items-center gap-2 text-sm">
-              <span className="hidden sm:inline">每页</span>
-              <Select
-                value={pageSize.toString()}
-                onValueChange={(v) => {
-                  setPageSize(parseInt(v, 10))
-                  setPage(1) // 切换每页数量时重置到第一页
-                }}
-              >
-                <SelectTrigger className="h-8 w-[70px]">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="10">10</SelectItem>
-                  <SelectItem value="20">20</SelectItem>
-                  <SelectItem value="50">50</SelectItem>
-                  <SelectItem value="100">100</SelectItem>
-                </SelectContent>
-              </Select>
-              <span className="hidden sm:inline">条</span>
-              <span className="text-muted-foreground">共 {total} 条</span>
-            </div>
-
-            {/* 中间：页码导航 */}
-            <Pagination className="mx-0 w-auto">
-              <PaginationContent>
-                <PaginationItem>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-8 w-8"
-                    onClick={() => setPage((p) => Math.max(1, p - 1))}
-                    disabled={page <= 1 || loading}
-                  >
-                    <ChevronLeft className="h-4 w-4" />
-                  </Button>
-                </PaginationItem>
-
-                {getPageNumbers().map((pageNum, idx) => (
-                  <PaginationItem key={idx}>
-                    {pageNum === 'ellipsis' ? (
-                      <PaginationEllipsis />
-                    ) : (
-                      <PaginationLink
-                        href="#"
-                        isActive={pageNum === page}
-                        onClick={(e) => {
-                          e.preventDefault()
-                          setPage(pageNum)
-                        }}
-                        className="h-8 w-8 cursor-pointer"
-                      >
-                        {pageNum}
-                      </PaginationLink>
-                    )}
-                  </PaginationItem>
-                ))}
-
-                <PaginationItem>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-8 w-8"
-                    onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-                    disabled={page >= totalPages || loading}
-                  >
-                    <ChevronRight className="h-4 w-4" />
-                  </Button>
-                </PaginationItem>
-              </PaginationContent>
-            </Pagination>
-
-            {/* 右侧：跳转 */}
-            <div className="hidden items-center gap-2 text-sm sm:flex">
-              <span className="text-muted-foreground">跳至</span>
-              <Input
-                type="number"
-                min={1}
-                max={totalPages}
-                value={jumpPage}
-                onChange={(e) => setJumpPage(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && handleJumpPage()}
-                className="h-8 w-16 text-center"
-                placeholder={page.toString()}
-              />
-              <span className="text-muted-foreground">页</span>
-              <Button
-                variant="outline"
-                size="sm"
-                className="h-8"
-                onClick={handleJumpPage}
-                disabled={loading}
-              >
-                跳转
-              </Button>
-            </div>
-          </div>
+          {/* 公共分页处理首尾页、省略页码与跳转。 */}
+          <DataPagination total={total} page={page} pageSize={pageSize}
+            onPageChange={setPage} disabled={loading}
+            onPageSizeChange={(size) => { setPageSize(size); setPage(1) }} />
         </>
       )}
 
@@ -1489,6 +1332,7 @@ export function ExpressionReviewer({
                           role="option"
                           id={`quick-expr-${expr.id}`}
                           aria-selected={true}
+                          data-quick-review-card="current"
                           className={cn(
                             'bg-card flex h-full min-h-0 flex-col overflow-hidden rounded-xl border p-5 shadow-xl select-none sm:p-6',
                             'ring-border/50 shadow-2xl ring-1 active:cursor-grabbing',
@@ -1547,7 +1391,10 @@ export function ExpressionReviewer({
                               <div className="text-muted-foreground text-xs font-semibold tracking-wider uppercase">
                                 情景
                               </div>
-                              <div className="bg-muted/30 border-border/50 rounded-lg border p-3">
+                              <div
+                                data-quick-review-situation="true"
+                                className="bg-muted/30 border-border/50 rounded-lg border p-3"
+                              >
                                 <p className="line-clamp-3 text-base leading-relaxed font-medium break-words sm:text-lg">
                                   {expr.situation}
                                 </p>
@@ -1588,6 +1435,7 @@ export function ExpressionReviewer({
                           role="option"
                           id={`quick-expr-${expr.id}`}
                           aria-selected={false}
+                          data-quick-review-card="behind"
                           className={cn(
                             'bg-card flex h-full min-h-0 flex-col overflow-hidden rounded-xl border p-5 shadow-xl select-none sm:p-6'
                           )}
@@ -1607,7 +1455,10 @@ export function ExpressionReviewer({
                               <div className="text-muted-foreground text-xs font-semibold tracking-wider uppercase">
                                 情景
                               </div>
-                              <div className="bg-muted/30 border-border/50 rounded-lg border p-3">
+                              <div
+                                data-quick-review-situation="true"
+                                className="bg-muted/30 border-border/50 rounded-lg border p-3"
+                              >
                                 <p className="line-clamp-3 text-base leading-relaxed font-medium break-words sm:text-lg">
                                   {expr.situation}
                                 </p>
@@ -1647,7 +1498,10 @@ export function ExpressionReviewer({
                 </div>
 
                 {/* 操作按钮（移动端） */}
-                <div className="z-50 flex shrink-0 items-center gap-8 sm:hidden">
+                <div
+                  data-quick-review-actions="true"
+                  className="z-50 flex shrink-0 items-center gap-8 sm:hidden"
+                >
                   {(() => {
                     const currentExpr = quickExpressions[quickCurrentIndex]
                     const directions = getAllowedDirections(currentExpr)
@@ -1656,6 +1510,8 @@ export function ExpressionReviewer({
                         <Button
                           variant="outline"
                           size="lg"
+                          aria-label="拒绝"
+                          data-quick-review-action="reject"
                           className={cn(
                             'h-16 w-16 rounded-full border-2 shadow-lg transition-all active:scale-95',
                             !directions.left
@@ -1670,6 +1526,8 @@ export function ExpressionReviewer({
                         <Button
                           variant="outline"
                           size="lg"
+                          aria-label="通过"
+                          data-quick-review-action="approve"
                           className={cn(
                             'h-16 w-16 rounded-full border-2 shadow-lg transition-all active:scale-95',
                             !directions.right
@@ -1722,7 +1580,8 @@ export function ExpressionReviewer({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
-        className="flex h-[90vh] w-[95vw] max-w-5xl flex-col p-0 sm:h-[85vh] sm:w-full"
+        // 手机上铺满整屏，避开状态栏
+        className="flex h-[90vh] w-[95vw] max-w-5xl flex-col p-0 max-sm:h-[100dvh] max-sm:max-h-none max-sm:rounded-none max-sm:pt-[env(safe-area-inset-top)] max-sm:pb-[env(safe-area-inset-bottom)] sm:h-[85vh] sm:w-full"
         hideCloseButton
       >
         {reviewerContent}

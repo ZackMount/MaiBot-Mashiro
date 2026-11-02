@@ -14,9 +14,12 @@ import time
 from httpx import AsyncClient
 from PIL import Image
 
+from src.common.http_client import get_shared_ssl_context_async
+from src.common.paths import get_instance_root
+
 AvatarTargetType = Literal["user", "group"]
 AvatarStatus = Literal["available", "unsupported", "missing"]
-AVATAR_CACHE_ROOT = Path(__file__).resolve().parents[2] / "data" / "avatar"
+AVATAR_CACHE_ROOT = get_instance_root() / "data" / "avatar"
 MAX_AVATAR_BYTES = 5 * 1024 * 1024
 AVATAR_CACHE_TTL = 86400
 AVATAR_NEGATIVE_TTL = 300
@@ -137,7 +140,7 @@ class AvatarService:
         if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
             raise ValueError("适配器头像 URL 必须为不含凭据的 HTTP(S) 地址")
         image_bytes = bytearray()
-        async with AsyncClient(timeout=10, follow_redirects=False) as client:
+        async with AsyncClient(verify=await get_shared_ssl_context_async(), timeout=10, follow_redirects=False) as client:
             async with client.stream("GET", url, headers={"User-Agent": "MaiBot-Avatar/1.0"}) as response:
                 response.raise_for_status()
                 async for chunk in response.aiter_bytes():

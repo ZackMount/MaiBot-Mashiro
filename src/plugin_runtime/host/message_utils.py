@@ -45,7 +45,10 @@ class MessageInfoDict(TypedDict, total=False):
 class MessageDict(TypedDict, total=False):
     message_id: str
     timestamp: str
+    received_at: str
     platform: str
+    account_id: Optional[str]
+    scope: Optional[str]
     message_info: MessageInfoDict
     raw_message: List[Dict[str, Any]]
     is_mentioned: bool
@@ -427,6 +430,8 @@ class PluginMessageUtils:
             message_id=session_message.message_id,
             timestamp=str(session_message.timestamp.timestamp()),  # 转换为时间戳字符串
             platform=session_message.platform,
+            account_id=session_message.account_id,
+            scope=session_message.scope,
             message_info=PluginMessageUtils._message_info_to_dict(session_message.message_info),
             raw_message=PluginMessageUtils._message_sequence_to_dict(
                 session_message.raw_message,
@@ -442,6 +447,8 @@ class PluginMessageUtils:
         )
 
         # 添加可选字段
+        if session_message.received_at is not None:
+            message_dict["received_at"] = session_message.received_at.isoformat(timespec="microseconds")
         if session_message.reply_to is not None:
             message_dict["reply_to"] = session_message.reply_to
         if session_message.processed_plain_text is not None:
@@ -517,10 +524,16 @@ class PluginMessageUtils:
             timestamp = datetime.now()  # 如果解析失败，使用当前时间
 
         # 创建 SessionMessage 实例
+        # received_at 由主程序入站入口记录，不接受外部载荷或 Hook 重新指定。
         session_message = SessionMessage(message_id=message_id, timestamp=timestamp, platform=platform)
 
         # 构建消息信息
         session_message.message_info = PluginMessageUtils._build_message_info_from_dict(message_dict["message_info"])
+        from src.platform_io.route_key_factory import RouteKeyFactory
+
+        route_key = RouteKeyFactory.from_message_dict(message_dict)
+        session_message.account_id = route_key.account_id
+        session_message.scope = route_key.scope
 
         # 构建原始消息组件序列（复用 MessageSequence.from_dict 方法）
         raw_message_data = message_dict["raw_message"]

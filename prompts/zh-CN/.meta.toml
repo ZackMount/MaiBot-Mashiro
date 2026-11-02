@@ -1,12 +1,22 @@
-[behavior_scene_analyze]
-display_name = "行为场景分析"
+[text_learning_expression]
+display_name = "长文学习表达"
 advanced = true
-description = "用于将最近聊天上下文拆分为可复用的行为场景片段，并提取领域标签、行为需求和互动特征。"
+description = "从用户粘贴的文段中提取有原文依据的表达候选，供用户选择导入。"
 
-[consolidate_behavior]
-display_name = "行为表现整合"
+[text_learning_jargon]
+display_name = "长文学习黑话"
 advanced = true
-description = "用于识别行为表现库中的语义重复条目，并输出可合并的 keeper 与 merge 方案。"
+description = "从用户粘贴的文段中提取黑话与含义，供用户选择导入。"
+
+[a_memorix_chat_summary]
+display_name = "长期记忆聊天总结"
+advanced = false
+description = "从当前聊天窗口提取可写入长期记忆的增量信息与重要知识。"
+
+[maisaka_chat_passive]
+display_name = "规划器（被动式 replyer）"
+advanced = true
+description = "开启实验性被动式 replyer 时使用；Planner 最终正文作为回复指导，工具调用仍用于操作。"
 
 [maisaka_chat]
 display_name = "规划器"
@@ -23,10 +33,15 @@ display_name = "回复"
 advanced = false
 description = "Maisaka 回复生成模板，负责根据人格、表达风格、群聊注意事项和待回复上下文生成最终回复。"
 
+[reply_attachments]
+display_name = "回复附件提示"
+advanced = true
+description = "说明回复附带的图片、@ 和表情包由系统发送，避免正文重复输出附件信息。"
+
 [retro_replyer]
 display_name = "复古回复"
 advanced = true
-description = "复古模式（experimental.replyer_retro_prompt）下的群聊回复模板，把全部回复指令集中在一份模板里，整段作为一条消息发送。"
+description = "复古模式（experimental.replyer_retro_prompt）下的群聊回复模板，人设与聊天注意事项作为首条 system 消息，其余模板作为 user 消息发送。"
 
 [retro_replyer_light]
 display_name = "复古回复（简短）"
@@ -67,11 +82,6 @@ description = "用于根据文本语境选择或替换表情包的模板。"
 display_name = "表情包选择"
 advanced = true
 description = "用于从表情包拼图中按上下文和当前语气选择最合适表情包的模板。"
-
-[evaluate_behavior_feedback]
-display_name = "行为反馈评估"
-advanced = true
-description = "用于评估已采用行为是否被真实执行，以及执行后的对话结果和奖励反馈。"
 
 [expression_evaluation]
 display_name = "表达评价"
@@ -123,32 +133,87 @@ display_name = "黑话学习"
 advanced = true
 description = "用于从真实聊天内容中抽取群内黑话候选，并交给黑话矿工更新含义和共现分布。"
 
-[learn_behavior]
-display_name = "行为表现学习"
-advanced = true
-description = "用于从真实聊天中抽取可复用的场景-行为-结果模式，支持观察学习和自身反馈。"
-
 [maisaka_chat_focus]
 display_name = "Focus 规划器"
 advanced = true
-description = "Focus 模式下的 Maisaka 规划模板，负责基于当前关注聊天和跨聊天概览选择下一步行动。"
+description = "Focus 共享规划器，结合组内全部聊天，通过工具的 session_id 指定处理目标。"
 
-[maisaka_timing_gate]
-display_name = "时机"
+[maisaka_chat_optimized]
+display_name = "规划器（优化版）"
 advanced = true
-description = "Maisaka 节奏控制模板，负责在每轮主循环前判断当前应该等待、停止，还是继续进入思考与回复流程。"
+description = "开启实验功能 experimental.planner_optimized_prompt 后使用的 Maisaka 主规划模板，以第二人称描述麦麦自己并精简了任务说明；Focus 模式仍使用 Focus 规划器。"
 
 [memory_fuzzy_modify_plan]
 display_name = "长期记忆模糊修改"
 advanced = true
 description = "用于根据用户的自然语言修改描述和候选记忆，规划失效旧记忆与写入新记忆的操作。"
 
-[mid_term_memory_summary]
-display_name = "中期聊天摘要"
+[context_compaction]
+display_name = "普通聊天滚动状态摘要"
 advanced = true
-description = "用于在上下文裁切时，将被移出的聊天记录概括成 long_summary、brief 和 keywords。"
+description = "复用普通聊天 Planner 请求，将历史与旧摘要整理为话题、背景、进展、未完事项和对话约定。"
+
+[context_compaction_focus]
+display_name = "Focus 滚动状态摘要"
+advanced = true
+description = "复用 Focus Planner 请求，为共享组生成五类滚动摘要，并保留各聊天的来源归属。"
 
 [webui_ai_search]
 display_name = "WebUI AI 搜索"
 advanced = true
 description = "用于根据自然语言意图从 WebUI 提供的真实页面与配置候选中选择搜索结果。"
+
+[webui_ai_search_final]
+display_name = "WebUI AI 搜索定稿指令"
+advanced = true
+description = "用于在 AI 搜索的工具轮次用尽或未按格式作答时，要求模型停止检索并返回最终 JSON。"
+
+[webui_ai_search_correction]
+display_name = "WebUI AI 搜索纠错指令"
+advanced = true
+description = "用于在 AI 搜索回答未通过证据校验时，要求模型删除无依据内容并重写最终 JSON。"
+
+[webui_ai_search_evidence]
+display_name = "WebUI AI 搜索证据消息"
+advanced = true
+description = "用于把 AI 搜索中只读工具的返回结果包装成无工具请求可用的证据消息。"
+
+[a_memorix_fact_deduplication]
+display_name = "长期记忆事实去重"
+advanced = true
+description = "判断新事实与已有记忆是否重复，保留独立事件、状态变化和矛盾信息。"
+
+[agent_acp]
+display_name = "外接 Agent 接入说明"
+advanced = true
+description = "外接 Agent 接入说明。"
+
+[agent_acp_computer]
+display_name = "外接 Agent 电脑使用"
+advanced = true
+description = "外接 Agent 电脑使用。"
+
+[agent_acp_environment]
+display_name = "外接 Agent 环境说明"
+advanced = true
+description = "外接 Agent 环境说明。"
+
+[agent_acp_failure]
+display_name = "外接 Agent 失败回报"
+advanced = true
+description = "外接 Agent 失败回报。"
+
+[agent_planner]
+display_name = "外接 Planner 接入说明"
+advanced = true
+description = "外接 Planner 接入说明。"
+
+[agent_planner_resume]
+display_name = "外接 Planner 中断恢复"
+advanced = true
+description = "外接 Planner 中断恢复。"
+
+[agent_planner_continue]
+display_name = "外接 Planner 继续执行"
+advanced = true
+description = "外接 Planner 继续执行。"

@@ -89,6 +89,7 @@ class DetailedStatisticsBreakdown(BaseModel):
     """模型、任务组、模块或请求类型维度的详细统计行。"""
 
     name: str
+    is_embedding: bool = False
     request_count: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
@@ -121,6 +122,11 @@ class DetailedDistributionItem(BaseModel):
 class DetailedStatisticsDistributions(BaseModel):
     """单个统计时段的分布图数据。"""
 
+    owner_tokens: List[DetailedDistributionItem]
+    model_tokens: List[DetailedDistributionItem]
+    module_tokens: List[DetailedDistributionItem]
+    request_type_tokens: List[DetailedDistributionItem]
+    chat_tokens: List[DetailedDistributionItem]
     owner_costs: List[DetailedDistributionItem]
     model_costs: List[DetailedDistributionItem]
     module_costs: List[DetailedDistributionItem]

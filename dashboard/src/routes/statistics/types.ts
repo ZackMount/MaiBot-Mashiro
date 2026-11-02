@@ -19,6 +19,7 @@ export interface DetailedStatisticsSummary {
 
 export interface DetailedStatisticsBreakdown {
   name: string
+  is_embedding: boolean
   request_count: number
   input_tokens: number
   output_tokens: number
@@ -45,6 +46,11 @@ export interface DetailedDistributionItem {
 }
 
 export interface DetailedStatisticsDistributions {
+  owner_tokens: DetailedDistributionItem[]
+  model_tokens: DetailedDistributionItem[]
+  module_tokens: DetailedDistributionItem[]
+  request_type_tokens: DetailedDistributionItem[]
+  chat_tokens: DetailedDistributionItem[]
   owner_costs: DetailedDistributionItem[]
   model_costs: DetailedDistributionItem[]
   module_costs: DetailedDistributionItem[]

@@ -1,4 +1,6 @@
-import { useEffect, useRef, useState, type CSSProperties, type PointerEvent, type ReactNode } from 'react'
+import { TimeRangeTrack, TimeRangeTicks } from '@/components/ui/time-range-track'
+import { formatTalkTimeRange, getTimelineSegments, parseTalkTimeRange, type TimelineRange } from '@/lib/time-range'
+import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 
 import {
   AlertCircle,
@@ -211,15 +213,6 @@ interface TalkRuleTimelineGroup {
   items: TalkRuleTimelineItem[]
 }
 
-interface TimelineRange {
-  end: number
-  start: number
-}
-
-const DAY_MINUTES = 24 * 60
-const TIMELINE_TICKS = [0, 3, 6, 9, 12, 15, 18, 21, 24]
-const TIMELINE_DRAG_STEP_MINUTES = 5
-
 const ruleTypeLabel = (rule: unknown) => {
   if (rule === 'private') return '私聊'
   if (rule === 'group') return '群聊'
@@ -263,15 +256,23 @@ const talkRuleGroupKey = (item: Record<string, unknown>) => {
   return `${platform}\u0000${itemId}\u0000${ruleType}`
 }
 
-const learningScopeLabel = (item: Record<string, unknown>) => {
+// 学习规则里 platform/item_id 的 * 与留空等价，都表示该层级的默认值。
+const learningTargetValues = (item: Record<string, unknown>) => {
   const platform = typeof item.platform === 'string' ? item.platform.trim() : ''
   const itemId = typeof item.item_id === 'string' ? item.item_id.trim() : ''
+  return {
+    anyPlatform: platform === '*',
+    platform: platform === '*' ? '' : platform,
+    itemId: itemId === '*' ? '' : itemId,
+  }
+}
+
+const learningScopeLabel = (item: Record<string, unknown>) => {
+  const { anyPlatform, platform, itemId } = learningTargetValues(item)
   if (!platform && !itemId) return '全局默认'
-  if (platform === '*' && itemId === '*') return '全部聊天'
-  if (platform === '*') return `任意平台:${itemId || '留空'}`
-  if (itemId === '*') return `${platform || '留空'}:全部目标`
-  if (platform && !itemId) return `${platform}:平台兜底`
-  if (!platform || !itemId) return `${platform || '留空'}:${itemId || '留空'}`
+  if (anyPlatform) return `任意平台:${itemId}`
+  if (!platform) return `留空:${itemId}`
+  if (!itemId) return `${platform}:平台默认`
   return `${platform}:${itemId}`
 }
 
@@ -364,6 +365,28 @@ const LEARNING_SCOPE_OPTIONS: Array<{
   },
 ]
 
+const LEARNING_RULE_SCOPE_OPTIONS: Array<{
+  description: string
+  kind: LearningScopeKind
+  title: string
+}> = [
+  {
+    kind: 'default',
+    title: '全局默认',
+    description: '没有更具体规则命中时使用',
+  },
+  {
+    kind: 'platformDefault',
+    title: '平台默认',
+    description: '该平台没有更具体规则时使用',
+  },
+  {
+    kind: 'chat',
+    title: '指定聊天流',
+    description: '指定平台里的一个具体聊天',
+  },
+]
+
 const GROUP_SCOPE_OPTIONS: Array<{
   description: string
   kind: GroupScopeKind
@@ -399,13 +422,10 @@ const EXACT_GROUP_SCOPE_OPTIONS: Array<{
 ]
 
 const resolveLearningScopeKind = (item: Record<string, unknown>): LearningScopeKind => {
-  const platform = normalizeSpecialTextValue(item.platform)
-  const itemId = normalizeSpecialTextValue(item.item_id)
+  const { anyPlatform, platform, itemId } = learningTargetValues(item)
   if (!platform && !itemId) return 'default'
-  if (platform === '*' && itemId === '*') return 'global'
-  if (platform === '*' && itemId && itemId !== '*') return 'target'
-  if (platform && platform !== '*' && !itemId) return 'platformDefault'
-  if (platform && platform !== '*' && itemId === '*') return 'platform'
+  if (anyPlatform) return 'target'
+  if (platform && !itemId) return 'platformDefault'
   return 'chat'
 }
 
@@ -1091,6 +1111,7 @@ function ChatTargetFields({
 function AddTargetScopeDialog<TScopeKind extends string>({
   description,
   defaultScope,
+  fixedRuleType,
   open,
   onAdd,
   onOpenChange,
@@ -1099,6 +1120,7 @@ function AddTargetScopeDialog<TScopeKind extends string>({
 }: {
   description: string
   defaultScope: TScopeKind
+  fixedRuleType?: ExpressionRuleType
   open: boolean
   onAdd: (scopeKind: TScopeKind, ruleType: ExpressionRuleType) => void
   onOpenChange: (open: boolean) => void
@@ -1142,24 +1164,26 @@ function AddTargetScopeDialog<TScopeKind extends string>({
               </button>
             ))}
           </div>
-          <div className="max-w-40 space-y-1">
-            <Label className="text-[11px] leading-none text-muted-foreground">聊天类型</Label>
-            <Select value={ruleType} onValueChange={(nextRuleType) => setRuleType(normalizeExpressionRuleType(nextRuleType))}>
-              <SelectTrigger className="h-8">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="group">群聊</SelectItem>
-                <SelectItem value="private">私聊</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
+          {!fixedRuleType && (
+            <div className="max-w-40 space-y-1">
+              <Label className="text-[11px] leading-none text-muted-foreground">聊天类型</Label>
+              <Select value={ruleType} onValueChange={(nextRuleType) => setRuleType(normalizeExpressionRuleType(nextRuleType))}>
+                <SelectTrigger className="h-8">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="group">群聊</SelectItem>
+                  <SelectItem value="private">私聊</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          )}
         </div>
         <DialogFooter>
           <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
             取消
           </Button>
-          <Button type="button" onClick={() => onAdd(activeScope, ruleType)}>
+          <Button type="button" onClick={() => onAdd(activeScope, fixedRuleType ?? ruleType)}>
             添加
           </Button>
         </DialogFooter>
@@ -1216,7 +1240,7 @@ function AddLearningRuleDialog({
       open={open}
       onAdd={onAdd}
       onOpenChange={onOpenChange}
-      scopeOptions={LEARNING_SCOPE_OPTIONS}
+      scopeOptions={LEARNING_RULE_SCOPE_OPTIONS}
       title="添加学习规则"
     />
   )
@@ -1251,9 +1275,6 @@ function LearningRuleItem({
   const chatTargetState = useExactChatTargetResolution(platformValue, itemId, ruleType, scopeKind === 'chat')
   const updateScopeField = (fieldName: string, fieldValue: unknown) => {
     onItemFieldChange(index, fieldName, fieldValue)
-    if (fieldName === 'platform' && scopeKind === 'platform') {
-      onItemFieldChange(index, 'item_id', '*')
-    }
   }
 
   return (
@@ -1602,52 +1623,7 @@ function ExpressionGroupMemberItem({
   )
 }
 
-const parseTimelineMinute = (value: string) => {
-  const match = /^(\d{1,2}):(\d{1,2})$/.exec(value.trim())
-  if (!match) return null
-
-  const hour = Number(match[1])
-  const minute = Number(match[2])
-  if (!Number.isInteger(hour) || !Number.isInteger(minute)) return null
-  if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return null
-
-  return hour * 60 + minute
-}
-
-const formatTimelineMinute = (minute: number) => {
-  const normalizedMinute = Math.max(0, Math.min(DAY_MINUTES - 1, Math.round(minute)))
-  const hour = Math.floor(normalizedMinute / 60)
-  const minuteInHour = normalizedMinute % 60
-  return `${hour.toString().padStart(2, '0')}:${minuteInHour.toString().padStart(2, '0')}`
-}
-
-const parseTalkTimeRange = (time: string): TimelineRange | null => {
-  const [startRaw, endRaw, extra] = time.trim().split('-')
-  const start = startRaw ? parseTimelineMinute(startRaw) : null
-  const end = endRaw ? parseTimelineMinute(endRaw) : null
-  if (extra !== undefined || start === null || end === null) {
-    return null
-  }
-  return { start, end }
-}
-
-const formatTalkTimeRange = (range: TimelineRange) => {
-  return `${formatTimelineMinute(range.start)}-${formatTimelineMinute(range.end)}`
-}
-
-const getTimelineMinuteFromClient = (clientX: number, timelineElement: HTMLElement) => {
-  const rect = timelineElement.getBoundingClientRect()
-  const relativeX = Math.max(0, Math.min(rect.width, clientX - rect.left))
-  const rawMinute = (relativeX / rect.width) * (DAY_MINUTES - 1)
-  return Math.round(rawMinute / TIMELINE_DRAG_STEP_MINUTES) * TIMELINE_DRAG_STEP_MINUTES
-}
-
 const fullDaySegment = (): TimelineSegment => ({ left: 0, width: 100 })
-
-const segmentFromMinutes = (start: number, end: number): TimelineSegment => ({
-  left: (start / DAY_MINUTES) * 100,
-  width: Math.max(((end - start) / DAY_MINUTES) * 100, 0.18),
-})
 
 const parseTalkTimeSegments = (time: string): { invalid: boolean; label: string; segments: TimelineSegment[] } => {
   const normalizedTime = time.trim()
@@ -1662,17 +1638,7 @@ const parseTalkTimeSegments = (time: string): { invalid: boolean; label: string;
   if (!range) {
     return { invalid: true, label: '时间格式错误', segments: [fullDaySegment()] }
   }
-  const { end, start } = range
-
-  if (start <= end) {
-    return { invalid: false, label: normalizedTime, segments: [segmentFromMinutes(start, end + 1)] }
-  }
-
-  return {
-    invalid: false,
-    label: `${normalizedTime} 跨夜`,
-    segments: [segmentFromMinutes(start, DAY_MINUTES), segmentFromMinutes(0, end + 1)],
-  }
+  return { invalid: false, label: range.start > range.end ? `${normalizedTime} 跨夜` : normalizedTime, segments: getTimelineSegments(range) }
 }
 
 const normalizeTalkValue = (value: unknown) => {
@@ -1854,89 +1820,8 @@ function TalkValueTimelineOverview({
 }) {
   const timelineItems = buildTalkTimelineItems(items)
   const timelineGroups = groupTalkTimelineItems(timelineItems)
-  const dragFrameRef = useRef<number | null>(null)
   const draggingTrackRef = useRef<{ groupKey: string; index: number } | null>(null)
-  const lastDragTimeRef = useRef<string | null>(null)
-  const pendingDragRef = useRef<{
-    clientX: number
-    edge: 'end' | 'start'
-    item: TalkRuleTimelineItem
-    timelineElement: HTMLElement
-  } | null>(null)
-  if (timelineItems.length === 0) {
-    return null
-  }
-
-  const commitRangeUpdate = (
-    item: TalkRuleTimelineItem,
-    edge: 'end' | 'start',
-    timelineElement: HTMLElement,
-    clientX: number,
-  ) => {
-    if (!item.range) {
-      return
-    }
-
-    const nextMinute = getTimelineMinuteFromClient(clientX, timelineElement)
-    const nextRange =
-      edge === 'start'
-        ? { ...item.range, start: nextMinute }
-        : { ...item.range, end: nextMinute }
-    const nextTime = formatTalkTimeRange(nextRange)
-    if (lastDragTimeRef.current === nextTime) {
-      return
-    }
-
-    lastDragTimeRef.current = nextTime
-    onItemFieldChange(item.index, 'time', nextTime)
-  }
-
-  const scheduleRangeUpdate = (
-    event: PointerEvent<HTMLElement>,
-    item: TalkRuleTimelineItem,
-    edge: 'end' | 'start',
-  ) => {
-    const timelineElement = event.currentTarget.closest('[data-talk-timeline-track]')
-    if (!(timelineElement instanceof HTMLElement)) {
-      return
-    }
-
-    pendingDragRef.current = {
-      clientX: event.clientX,
-      edge,
-      item,
-      timelineElement,
-    }
-
-    if (dragFrameRef.current !== null) {
-      return
-    }
-
-    dragFrameRef.current = window.requestAnimationFrame(() => {
-      dragFrameRef.current = null
-      const pendingDrag = pendingDragRef.current
-      if (!pendingDrag) {
-        return
-      }
-      commitRangeUpdate(
-        pendingDrag.item,
-        pendingDrag.edge,
-        pendingDrag.timelineElement,
-        pendingDrag.clientX,
-      )
-    })
-  }
-
-  const startRangeDrag = (
-    event: PointerEvent<HTMLElement>,
-    item: TalkRuleTimelineItem,
-    edge: 'end' | 'start',
-  ) => {
-    event.preventDefault()
-    lastDragTimeRef.current = null
-    event.currentTarget.setPointerCapture(event.pointerId)
-    scheduleRangeUpdate(event, item, edge)
-  }
+  if (timelineItems.length === 0) return null
 
   const reorderTrack = (targetItem: TalkRuleTimelineItem) => {
     const draggingTrack = draggingTrackRef.current
@@ -1965,17 +1850,7 @@ function TalkValueTimelineOverview({
         <div className="min-w-[540px] p-2.5">
           <div className="grid grid-cols-[5.5rem_minmax(16rem,1fr)_6.5rem] gap-2 pb-1.5 text-[11px] text-muted-foreground">
             <div>轨道</div>
-            <div className="relative h-4 px-1">
-              {TIMELINE_TICKS.map((hour) => (
-                <span
-                  key={hour}
-                  className="absolute -translate-x-1/2"
-                  style={{ left: `${(hour / 24) * 100}%` }}
-                >
-                  {hour.toString().padStart(2, '0')}:00
-                </span>
-              ))}
-            </div>
+            <TimeRangeTicks />
             <div>频率</div>
           </div>
           <div className="space-y-2.5">
@@ -2068,67 +1943,10 @@ function TalkValueTimelineOverview({
                         </div>
                         </div>
                       </div>
-                      <div
-                        className="relative h-7 rounded-md border bg-background"
-                        data-talk-timeline-track
-                      >
-                        {TIMELINE_TICKS.slice(1, -1).map((hour) => (
-                          <span
-                            key={hour}
-                            className="absolute top-0 h-full border-l border-dashed border-muted-foreground/20"
-                            style={{ left: `${(hour / 24) * 100}%` }}
-                          />
-                        ))}
-                        {item.segments.map((segment, segmentIndex) => (
-                          <span
-                            key={segmentIndex}
-                            className={`absolute top-1/2 h-4 -translate-y-1/2 rounded-sm ${talkValueColor(item.value)} ${
-                              item.invalidTime ? 'opacity-35' : 'opacity-85'
-                            }`}
-                            style={{
-                              left: `${segment.left}%`,
-                              width: `${segment.width}%`,
-                            }}
-                            title={`${item.timeLabel} · 频率 ${item.value.toFixed(2)}`}
-                          />
-                        ))}
-                        {item.range && !item.invalidTime && (
-                          <>
-                            <button
-                              type="button"
-                              className="absolute top-1/2 h-6 w-2 -translate-x-1/2 -translate-y-1/2 rounded-sm border border-background bg-foreground/80 shadow-sm cursor-ew-resize"
-                              style={{ left: `${(item.range.start / DAY_MINUTES) * 100}%` }}
-                              aria-label={`调整${group.label}轨道 ${trackIndex + 1} 开始时间`}
-                              onPointerDown={(event) => startRangeDrag(event, item, 'start')}
-                              onPointerMove={(event) => {
-                                if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-                                  scheduleRangeUpdate(event, item, 'start')
-                                }
-                              }}
-                              onPointerUp={(event) => {
-                                pendingDragRef.current = null
-                                event.currentTarget.releasePointerCapture(event.pointerId)
-                              }}
-                            />
-                            <button
-                              type="button"
-                              className="absolute top-1/2 h-6 w-2 -translate-x-1/2 -translate-y-1/2 rounded-sm border border-background bg-foreground/80 shadow-sm cursor-ew-resize"
-                              style={{ left: `${((item.range.end + 1) / DAY_MINUTES) * 100}%` }}
-                              aria-label={`调整${group.label}轨道 ${trackIndex + 1} 结束时间`}
-                              onPointerDown={(event) => startRangeDrag(event, item, 'end')}
-                              onPointerMove={(event) => {
-                                if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-                                  scheduleRangeUpdate(event, item, 'end')
-                                }
-                              }}
-                              onPointerUp={(event) => {
-                                pendingDragRef.current = null
-                                event.currentTarget.releasePointerCapture(event.pointerId)
-                              }}
-                            />
-                          </>
-                        )}
-                      </div>
+                      <TimeRangeTrack range={item.range} segments={item.segments}
+                        disabled={item.invalidTime} label={`${group.label}轨道 ${trackIndex + 1} `}
+                        colorClassName={`${talkValueColor(item.value)} ${item.invalidTime ? 'opacity-35' : 'opacity-85'}`}
+                        onChange={(next) => onItemFieldChange(item.index, 'time', formatTalkTimeRange(next))} />
                       <div className="grid grid-cols-[minmax(0,1fr)_1.75rem] items-center gap-1.5">
                         <div>
                           <Slider
@@ -2137,8 +1955,8 @@ function TalkValueTimelineOverview({
                             max={1}
                             step={0.01}
                             onValueChange={(values) => onItemFieldChange(item.index, 'value', values[0])}
-                            data-dashboard-slider="config"
-                            data-dashboard-slider-value-format="fixed-2"
+                            variant="value"
+                            valueFormat="fixed-2"
                           />
                         </div>
                         <Button
@@ -2238,16 +2056,12 @@ function TalkValueGroupedRuleEditor({
             </div>
             <div className="space-y-2">
               <Label className="text-xs font-medium">聊天类型</Label>
-              <Select
-                value={group.ruleType === 'private' ? 'private' : 'group'}
-                onValueChange={(value) => updateGroupField(group, 'rule_type', value)}
-              >
+              <Select value="group" disabled>
                 <SelectTrigger>
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="group">群聊</SelectItem>
-                  <SelectItem value="private">私聊</SelectItem>
                 </SelectContent>
               </Select>
             </div>
@@ -2319,8 +2133,8 @@ function TalkValueGroupedRuleEditor({
                         max={1}
                         step={0.01}
                         onValueChange={(values) => onItemFieldChange(item.index, 'value', values[0])}
-                        data-dashboard-slider="config"
-                        data-dashboard-slider-value-format="fixed-2"
+                        variant="value"
+                        valueFormat="fixed-2"
                       />
                       <Input
                         type="number"
@@ -2432,7 +2246,8 @@ function TalkValueRuleEditor({
       </div>
       <AddTargetScopeDialog
         defaultScope="chat"
-        description="选择规则作用范围和聊天类型。添加后可在规则区域继续填写平台、聊天流 ID、时间段和发言频率。"
+        fixedRuleType="group"
+        description="选择群聊规则的作用范围。添加后可继续填写平台、群聊 ID、时间段和发言频率。"
         open={addDialogOpen}
         onAdd={handleAddRule}
         onOpenChange={setAddDialogOpen}
@@ -2504,8 +2319,6 @@ const normalizeExpressionGroups = (value: unknown): ExpressionGroupValue[] => {
       rawMembers = source.expression_groups
     } else if (Array.isArray(source.jargon_groups)) {
       rawMembers = source.jargon_groups
-    } else if (Array.isArray(source.behavior_groups)) {
-      rawMembers = source.behavior_groups
     }
     const members = rawMembers.map(normalizeExpressionTarget)
     return { targets: members }
@@ -2658,7 +2471,7 @@ function createStringListHook(options: StringListHookOptions): FieldHookComponen
             {items.map((item, itemIndex) => (
               <div
                 key={itemIndex}
-                className={`grid gap-2 sm:grid-cols-[minmax(0,1fr)_2.5rem]${options.borderless ? '' : ' rounded-md border bg-muted/20 p-3'}`}
+                className={`grid grid-cols-[minmax(0,1fr)_2.5rem] items-start gap-2${options.borderless ? '' : ' rounded-md border bg-muted/20 p-3'}`}
               >
                 <InputComponent
                   value={item}
@@ -2724,20 +2537,21 @@ export const AliasNamesHook: FieldHookComponent = (props) => {
 
 export const MultipleReplyStyleHook = createStringListHook({
   addLabel: '添加表达风格',
+  borderless: true,
   emptyText: '暂无备用表达风格。',
   label: '备用表达风格',
   multiline: true,
   placeholder: '输入一种备用表达风格',
 })
 
-export const ChatTalkValueRulesHook = createListItemEditorHook({
+const GroupTalkValueRulesHook = createListItemEditorHook({
   addLabel: '添加发言频率规则',
   addButtonPlacement: 'none',
   collapseWhen: ({ parentValues }) => parentValues?.enable_talk_value_rules === false,
   collapsedText: '动态发言频率规则未启用，规则列表已折叠。展开后仍可查看或编辑已有规则。',
   expandLabel: '展开规则',
   collapseLabel: '折叠规则',
-  helperText: '可按平台/聊天流/时段分别配置发言频率。平台和聊天流都空表示全局；只填平台或聊天流表示对应默认值；* 表示通配覆盖。时间留空表示兜底，* 表示强制全天。',
+  helperText: '仅对群聊生效，可按平台/群聊/时段配置频率。平台和群聊都空表示全局；只填其中一项表示对应默认值；* 表示通配覆盖。时间留空表示兜底，* 表示强制全天。',
   emptyText: '尚未配置任何规则，将使用全局默认频率。',
   collapseButtonDisplay: 'icon',
   fieldRows: [
@@ -2769,6 +2583,29 @@ export const ChatTalkValueRulesHook = createListItemEditorHook({
       typeof item.value === 'number' ? item.value.toFixed(2) : '—'
     return `${platformLabel(item)} · ${ruleTypeLabel(item.rule_type)} · ${time} · 频率 ${value}`
   },
+})
+
+export const ChatTalkValueRulesHook: FieldHookComponent = (props) => {
+  const rules = Array.isArray(props.value) ? props.value as Record<string, unknown>[] : []
+  const privateRules = rules.filter((rule) => rule.rule_type === 'private')
+  return (
+    <GroupTalkValueRulesHook
+      {...props}
+      value={rules.filter((rule) => rule.rule_type !== 'private')}
+      onChange={(value) => {
+        // 旧私聊频率规则不再展示或生效，编辑群聊时仍保留原配置。
+        props.onChange?.([...privateRules, ...(value as Record<string, unknown>[])])
+      }}
+    />
+  )
+}
+
+export const PrivateReplyPauseRulesHook = createListItemEditorHook({
+  addLabel: '添加私聊暂停规则',
+  helperText: '填写具体平台和用户 ID。开启开关暂停该私聊，关闭开关允许回复；删除规则后跟随全局私聊设置。也可直接在聊天流设置中切换。',
+  emptyText: '所有私聊都跟随全局暂停开关。',
+  fieldRows: [['platform', 'item_id', 'paused']],
+  itemTitle: (item) => `${String(item.platform || '平台')} · ${String(item.item_id || '用户')} · ${item.paused ? '暂停回复' : '正常回复'}`,
 })
 
 export const ChatPromptsHook = createListItemEditorHook({
@@ -2806,7 +2643,7 @@ export const ChatPromptsHook = createListItemEditorHook({
 export const ExpressionLearningListHook = createListItemEditorHook({
   addLabel: '添加学习规则',
   addButtonPlacement: 'none',
-  infoText: '可以单独为每个聊天开启学习和使用；平台和聊天流 ID 都留空表示全局默认，只填平台表示平台兜底，* 表示通配。',
+  infoText: '可以单独为每个聊天开启学习和使用；平台和聊天流 ID 都留空表示全局默认，只填平台表示平台默认；越具体的规则越优先，* 与留空等价。',
   emptyText: '尚未配置任何学习规则。',
   fallbackNestedSchema: LEARNING_ITEM_FALLBACK_SCHEMA,
   renderItems: ({
@@ -2832,7 +2669,7 @@ export const ExpressionLearningListHook = createListItemEditorHook({
 export const JargonLearningListHook = createListItemEditorHook({
   addLabel: '添加黑话学习规则',
   addButtonPlacement: 'none',
-  infoText: '可以单独为每个聊天开启黑话学习和使用；平台和聊天流 ID 都留空表示全局默认，只填平台表示平台兜底，* 表示通配。平台下拉来自基础设置中已定义的平台。',
+  infoText: '可以单独为每个聊天开启黑话学习和使用；平台和聊天流 ID 都留空表示全局默认，只填平台表示平台默认；越具体的规则越优先，* 与留空等价。平台下拉来自基础设置中已定义的平台。',
   emptyText: '尚未配置任何黑话学习规则。',
   fallbackNestedSchema: LEARNING_ITEM_FALLBACK_SCHEMA,
   renderItems: ({
@@ -2849,32 +2686,6 @@ export const JargonLearningListHook = createListItemEditorHook({
       onItemFieldChange={onItemFieldChange}
       onRemoveItem={onRemoveItem}
       usePlatformSelect
-    />
-  ),
-  itemTitle: (item) => {
-    return `${learningScopeLabel(item)} · ${ruleTypeLabel(item.type)} · ${learningFlagLabel(item)}`
-  },
-})
-
-export const BehaviorLearningListHook = createListItemEditorHook({
-  addLabel: '添加行为学习规则',
-  addButtonPlacement: 'none',
-  infoText: '可以单独为每个聊天开启行为经验的学习和使用；平台和聊天流 ID 都留空表示全局默认，只填平台表示平台兜底，* 表示通配。',
-  emptyText: '尚未配置任何行为学习规则。',
-  fallbackNestedSchema: LEARNING_ITEM_FALLBACK_SCHEMA,
-  renderItems: ({
-    emptyText,
-    items,
-    onAddItem,
-    onItemFieldChange,
-    onRemoveItem,
-  }) => (
-    <LearningRuleEditor
-      emptyText={emptyText}
-      items={items}
-      onAddItem={onAddItem}
-      onItemFieldChange={onItemFieldChange}
-      onRemoveItem={onRemoveItem}
     />
   ),
   itemTitle: (item) => {
@@ -3270,7 +3081,6 @@ export const RegexRulesHook = createListItemEditorHook({
 export const ExpressionGroupsHook: FieldHookComponent = ({ fieldPath, onChange, onParentChange, parentValues, schema, value }) => {
   const groups = normalizeExpressionGroups(value)
   const isJargonGroup = fieldPath?.includes('jargon') ?? false
-  const isBehaviorGroup = fieldPath?.includes('behavior') ?? false
   const isSharedMemoryGroup = fieldPath?.includes('shared_memory_groups') ?? false
   const isFocusGroup = fieldPath?.includes('focus_groups') ?? false
   const displaysAsSection =
@@ -3282,12 +3092,10 @@ export const ExpressionGroupsHook: FieldHookComponent = ({ fieldPath, onChange, 
     ? '共享记忆组'
     : isFocusGroup
       ? 'Focus 共享组'
-      : isBehaviorGroup
-        ? '行为共享组'
-        : isJargonGroup
-          ? '黑话共享组'
-          : '表达共享组'
-  const learnedContentLabel = isBehaviorGroup ? '行为经验' : isJargonGroup ? '黑话' : '表达方式'
+      : isJargonGroup
+        ? '黑话共享组'
+        : '表达共享组'
+  const learnedContentLabel = isJargonGroup ? '黑话' : '表达方式'
   const supportsWildcardTargets = !isSharedMemoryGroup
   const groupScopeOptions = supportsWildcardTargets ? GROUP_SCOPE_OPTIONS : EXACT_GROUP_SCOPE_OPTIONS
   const helperText = isSharedMemoryGroup
@@ -3670,10 +3478,6 @@ export const ExpressionGroupsHook: FieldHookComponent = ({ fieldPath, onChange, 
 
 export const JargonGroupsHook = ExpressionGroupsHook
 
-export const BehaviorGroupsHook = ExpressionGroupsHook
-
-export const BehaviorFocusGroupsHook = ExpressionGroupsHook
-
 export const AMemorixSharedMemoryGroupsHook = ExpressionGroupsHook
 
 export const MCPRootItemsHook = createJsonFieldHook({
@@ -3687,3 +3491,5 @@ export const MCPServersHook = createJsonFieldHook({
   helperText: 'MCP 服务器配置结构较复杂，使用 JSON 编辑。',
   placeholder: '[\n  {\n    "name": "example-server",\n    "enabled": true,\n    "transport": "stdio",\n    "command": "uvx",\n    "args": ["example-server"],\n    "env": {},\n    "url": "",\n    "headers": {},\n    "http_timeout_seconds": 30.0,\n    "read_timeout_seconds": 300.0,\n    "authorization": {\n      "mode": "none",\n      "bearer_token": ""\n    }\n  }\n]',
 })
+
+export const FocusGroupsHook = ExpressionGroupsHook

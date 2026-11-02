@@ -1,7 +1,8 @@
 from enum import Enum
-from typing import Any, List, Tuple
+from typing import Any, List, Literal, Tuple
 
 from src.common.i18n import t
+from src.web_search.config import WebSearchTaskConfig
 
 from .config_base import ConfigBase, Field
 
@@ -164,7 +165,7 @@ class APIProvider(ConfigBase):
             "x-widget": "input",
         },
     )
-    """最大重试次数 (单个模型API调用失败, 最多重试的次数)"""
+    """最大尝试次数 (单个模型API调用失败时, 含首次请求在内最多发送的请求总数, 设为 0 或 1 表示不重试)"""
 
     timeout: int = Field(
         default=120,
@@ -238,6 +239,11 @@ class ModelInfo(ConfigBase):
     _validate_any: bool = False
     suppress_any_warning: bool = True
 
+    model_type: Literal["llm", "embedding", "image_embedding"] = Field(
+        json_schema_extra={"x-widget": "select"},
+    )
+    """模型类型：LLM、文本嵌入或图片嵌入；必填，旧配置由版本升级钩子一次性标注。"""
+
     model_identifier: str = Field(
         default="",
         json_schema_extra={
@@ -271,11 +277,6 @@ class ModelInfo(ConfigBase):
         },
     )
     """输入价格 (用于API调用统计, 单位：元/ M token) (可选, 若无该字段, 默认值为0)"""
-
-    cache: bool = Field(
-        default=False,
-    )
-    """遗留兼容字段，不参与任何逻辑：是否按缓存价计费由 cache_price_in 决定，统计页是否展示缓存用量由服务商是否在响应中返回缓存字段自动探测。"""
 
     cache_price_in: float = Field(
         default=0.0,
@@ -439,6 +440,12 @@ class TaskConfig(ConfigBase):
 class ModelTaskConfig(ConfigBase):
     """模型配置类"""
 
+    web_search: WebSearchTaskConfig = Field(
+        default_factory=WebSearchTaskConfig,
+        json_schema_extra={"x-widget": "custom", "label": {"zh_CN": "联网搜索 (web_search)"}},
+    )
+    """选择已定义的联网服务，用于搜索和网页读取；未分配时不开放统一联网工具。"""
+
     replyer: TaskConfig = Field(
         default_factory=TaskConfig,
         json_schema_extra={
@@ -464,15 +471,6 @@ class ModelTaskConfig(ConfigBase):
     )
     """记忆模型配置，用于长期记忆总结、抽取、写回等高记忆任务；留空时由调用方按需回退"""
 
-    mid_memory: TaskConfig = Field(
-        default_factory=TaskConfig,
-        json_schema_extra={
-            "x-widget": "custom",
-            "advanced": True,
-        },
-    )
-    """聊天回想模型配置；留空时自动继用 planner 模型"""
-
     utils: TaskConfig = Field(
         default_factory=TaskConfig,
         json_schema_extra={
@@ -490,14 +488,14 @@ class ModelTaskConfig(ConfigBase):
     )
     """学习模型配置，用于表达方式学习和黑话学习；留空时用 utils 模型"""
 
-    expression_use: TaskConfig = Field(
+    fast_model: TaskConfig = Field(
         default_factory=TaskConfig,
         json_schema_extra={
             "x-widget": "custom",
             "advanced": True,
         },
     )
-    """表达方式使用模型配置；留空时用 utils 模型"""
+    """快速模型配置，用于表达方式选择、回复断句等需要快速完成的小任务，建议选择响应快的模型；留空时用 utils 模型"""
 
     emoji: TaskConfig = Field(
         default_factory=TaskConfig,
@@ -531,7 +529,7 @@ class ModelTaskConfig(ConfigBase):
             "x-widget": "custom",
         },
     )
-    """嵌入模型，需要文本嵌入类型的模型，不可使用LLM"""
+    """嵌入模型；可选择文本或图片嵌入类型，不可使用 LLM，所选模型需支持文本向量化"""
 
     image_embedding: TaskConfig = Field(
         default_factory=TaskConfig,
@@ -540,4 +538,4 @@ class ModelTaskConfig(ConfigBase):
             "advanced": True,
         },
     )
-    """图片嵌入模型；留空时不启用图片嵌入，所选模型必须实现图片输入到向量的协议"""
+    """图片嵌入模型；可选择文本或图片嵌入类型，不可使用 LLM，留空时不启用；所选模型必须实现图片输入到向量的协议"""

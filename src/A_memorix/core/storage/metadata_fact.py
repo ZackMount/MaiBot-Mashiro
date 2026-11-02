@@ -15,7 +15,6 @@ _STABILITIES = {"stable", "temporal", "uncertain"}
 _AUTHORITIES = {"manual", "direct_user", "imported", "summary_derived"}
 _STATUSES = {"active", "conflicted", "superseded", "retracted"}
 _EVIDENCE_STANCES = {"support", "refute"}
-_TRUSTED_FACT_ORIGINS = {"manual_confirmed", "server_verified", "trusted_import"}
 _PROFILE_SECTIONS = {
     "identity_settings",
     "relationship_settings",
@@ -896,7 +895,11 @@ class MetadataFactMixin:
             FROM fact_claims
             WHERE scope_type = 'person' AND scope_id = ? AND status = 'active'
               AND stability = 'stable'
-              AND authority IN ('manual', 'direct_user', 'imported')
+              AND NOT EXISTS (
+                  SELECT 1 FROM fact_evidence e JOIN paragraphs p ON p.hash=e.evidence_id
+                  WHERE e.claim_id=fact_claims.claim_id AND e.evidence_type='paragraph'
+                    AND json_extract(p.metadata, '$.dedup_phase')='pending'
+              )
               AND (valid_from IS NULL OR valid_from <= ?)
               AND (valid_to IS NULL OR valid_to > ?)
             ORDER BY
@@ -941,10 +944,14 @@ class MetadataFactMixin:
             WHERE scope_type = 'person' AND scope_id = ? AND status = 'active'
               AND (valid_from IS NULL OR valid_from <= ?)
               AND (valid_to IS NULL OR valid_to > ?)
+              AND NOT EXISTS (
+                  SELECT 1 FROM fact_evidence e JOIN paragraphs p ON p.hash=e.evidence_id
+                  WHERE e.claim_id=fact_claims.claim_id AND e.evidence_type='paragraph'
+                    AND json_extract(p.metadata, '$.dedup_phase')='pending'
+              )
               AND (
                     (
                         stability = 'stable'
-                        AND authority IN ('manual', 'direct_user', 'imported')
                     )
                     OR (
                         stability = 'uncertain'
@@ -1058,35 +1065,22 @@ class MetadataFactMixin:
             raw_claim = metadata.get("fact_claim")
             claim_spec = dict(raw_claim) if isinstance(raw_claim, dict) else {}
             trust = _normalized_token(claim_spec.get("trust"))
-            trusted = trust in _TRUSTED_FACT_ORIGINS
             observed_at = row.get("event_time") or row.get("created_at")
+            # 无分类的旧摘要不能在迁移时获得模型未给出的稳定结论。
+            user_supported = evidence_source == "user_supported"
             result = self.upsert_fact_claim(
                 scope_type="person",
                 scope_id=person_id,
-                fact_key=(
-                    str(claim_spec.get("fact_key", "") or f"statement:{paragraph_hash}")
-                    if trusted
-                    else f"statement:{paragraph_hash}"
-                ),
+                fact_key=str(claim_spec.get("fact_key") or f"statement:{paragraph_hash}"),
                 value_text=content,
-                polarity=str(claim_spec.get("polarity", "positive") or "positive") if trusted else "positive",
-                cardinality=str(claim_spec.get("cardinality", "set") or "set") if trusted else "set",
-                stability=str(claim_spec.get("stability", "stable") or "stable") if trusted else "uncertain",
-                profile_section=(
-                    str(claim_spec.get("profile_section", "stable_facts") or "stable_facts")
-                    if trusted
-                    else "uncertain_notes"
-                ),
-                authority=(
-                    str(claim_spec.get("authority", "") or "direct_user")
-                    if trusted
-                    else "summary_derived"
-                ),
-                confidence=(
-                    float(claim_spec.get("confidence", 1.0) or 1.0)
-                    if trusted
-                    else min(0.5, float(claim_spec.get("confidence", 0.5) or 0.5))
-                ),
+                polarity=str(claim_spec.get("polarity", "positive")),
+                cardinality=str(claim_spec.get("cardinality", "set")),
+                stability=str(claim_spec.get("stability", "stable" if user_supported else "uncertain")),
+                profile_section=str(claim_spec.get("profile_section", "stable_facts" if user_supported else "uncertain_notes")),
+                authority=str(claim_spec.get("authority") or (
+                    "direct_user" if evidence_source == "user_supported" else "summary_derived"
+                )),
+                confidence=float(claim_spec.get("confidence", 1.0 if user_supported else 0.5)),
                 evidence_type="paragraph",
                 evidence_id=paragraph_hash,
                 evidence_metadata={
@@ -1131,6 +1125,37 @@ class MetadataFactMixin:
         )
         return [self._fact_evidence_row(row) or {} for row in cursor.fetchall()]
 
+    def project_fact_paragraph(self, paragraph: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """仅对去重管理的新段落投影有效事实，旧混合段落保留原文。"""
+        metadata = paragraph.get("metadata") or {}
+        if metadata.get("dedup_phase") == "pending":
+            return None
+        if not metadata.get("dedup_managed"):
+            return paragraph
+        now = datetime.now().timestamp()
+        rows = self.query(
+            "SELECT c.claim_id, c.value_text FROM fact_claims c JOIN fact_evidence e ON e.claim_id=c.claim_id "
+            "WHERE e.evidence_type='paragraph' AND e.evidence_id=? AND c.status='active' "
+            "AND (c.valid_from IS NULL OR c.valid_from<=?) AND (c.valid_to IS NULL OR c.valid_to>?)",
+            (paragraph["hash"], now, now),
+        )
+        active = {_normalized_token(row["value_text"]) for row in rows}
+        texts = metadata.get("dedup_fact_texts", [paragraph["content"]])
+        kept = [text for text in texts if _normalized_token(text) in active]
+        if not kept:
+            return None
+        return {**paragraph, "content": "\n".join(kept), "active_fact_claim_ids": [row["claim_id"] for row in rows]}
+
+    def fact_relation_has_support(self, relation_hash: str, paragraph: Dict[str, Any]) -> bool:
+        projected = self.project_fact_paragraph(paragraph)
+        if projected is None:
+            return False
+        metadata = paragraph.get("metadata") or {}
+        if not metadata.get("dedup_managed"):
+            return True
+        claims = metadata.get("dedup_relation_claims", {}).get(relation_hash, [])
+        return bool(set(claims).intersection(projected["active_fact_claim_ids"]))
+
     def snapshot_fact_evidence_for_paragraphs(
         self,
         paragraph_hashes: Sequence[str],
@@ -1155,10 +1180,11 @@ class MetadataFactMixin:
             f"""
             SELECT *
             FROM fact_evidence
-            WHERE evidence_type = 'paragraph' AND evidence_id IN ({placeholders})
+            WHERE (evidence_type = 'paragraph' AND evidence_id IN ({placeholders}))
+               OR (evidence_type = 'source' AND json_extract(metadata_json, '$.paragraph_hash') IN ({placeholders}))
             ORDER BY claim_id ASC, evidence_id ASC, stance ASC
             """,
-            tuple(hashes),
+            tuple(hashes) + tuple(hashes),
         )
         evidence = [self._fact_evidence_row(row) or {} for row in cursor.fetchall()]
         claim_ids = list(
@@ -1202,6 +1228,46 @@ class MetadataFactMixin:
                 )
 
         snapshot = self.snapshot_fact_evidence_for_paragraphs(paragraph_hashes, conn=conn)
+        return self._detach_fact_evidence_snapshot(snapshot, reason=reason, conn=conn, detached_at=detached_at)
+
+    def detach_fact_evidence_for_sources(
+        self, observation_ids: Sequence[str], *, reason: str, detached_at: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """撤销指定实际来源；其他来源仍支持事实时不撤回该事实。"""
+        ids = list(dict.fromkeys(str(value).strip() for value in observation_ids if str(value).strip()))
+        if not ids:
+            return {"paragraph_hashes": [], "claims": [], "evidence": [], "detached_evidence_count": 0,
+                    "retracted_claim_ids": []}
+        with self.transaction(immediate=True) as conn:
+            placeholders = ",".join("?" for _ in ids)
+            rows = conn.execute(
+                f"SELECT * FROM fact_evidence WHERE evidence_type='source' AND evidence_id IN ({placeholders})", ids,
+            ).fetchall()
+            evidence = [self._fact_evidence_row(row) for row in rows]
+            claim_ids = list(dict.fromkeys(row["claim_id"] for row in evidence))
+            claims = [self.get_fact_claim(claim_id) for claim_id in claim_ids]
+            for claim_id in claim_ids:
+                remaining = conn.execute(
+                    "SELECT 1 FROM fact_evidence WHERE claim_id=? AND evidence_type='source' "
+                    f"AND stance='support' AND evidence_id NOT IN ({placeholders}) LIMIT 1", (claim_id, *ids),
+                ).fetchone()
+                if remaining is None:
+                    # 新记忆的段落是来源的投影；最后一份来源撤销时一并撤销投影证据。
+                    # 旧段落本身仍是独立的历史证据，不能连带删除。
+                    anchors = conn.execute(
+                        "SELECT * FROM fact_evidence WHERE claim_id=? AND evidence_type='paragraph' "
+                        "AND json_extract(metadata_json, '$.source_managed')=1", (claim_id,),
+                    ).fetchall()
+                    evidence.extend(self._fact_evidence_row(row) for row in anchors)
+            return self._detach_fact_evidence_snapshot(
+                {"paragraph_hashes": [], "claims": claims, "evidence": evidence},
+                reason=reason, conn=conn, detached_at=detached_at,
+            )
+
+    def _detach_fact_evidence_snapshot(
+        self, snapshot: Dict[str, Any], *, reason: str, conn: Any, detached_at: Optional[float],
+    ) -> Dict[str, Any]:
+        """共享段落删除与来源撤销的证据移除和状态更新。"""
         evidence = [dict(item) for item in snapshot.get("evidence", []) if isinstance(item, dict)]
         if not evidence:
             return {**snapshot, "detached_evidence_count": 0, "retracted_claim_ids": []}
@@ -1260,6 +1326,17 @@ class MetadataFactMixin:
                 created_at=now,
             )
             retracted_claim_ids.append(claim_id)
+
+        if retracted_claim_ids:
+            for claim in snapshot.get("claims", []):
+                if claim["claim_id"] in retracted_claim_ids and claim["scope_type"] == "person":
+                    cursor.execute("UPDATE person_profile_snapshots SET expires_at=0 WHERE person_id=?", (claim["scope_id"],))
+            paragraph_ids = {row["metadata"].get("paragraph_hash") for row in evidence
+                             if row.get("evidence_type") == "source" and row.get("metadata")}
+            for paragraph_id in paragraph_ids:
+                paragraph = self.get_paragraph(paragraph_id) if paragraph_id else None
+                if paragraph and paragraph.get("source"):
+                    self.enqueue_episode_source_rebuild(paragraph["source"], reason="fact_evidence_retracted")
 
         return {
             **snapshot,

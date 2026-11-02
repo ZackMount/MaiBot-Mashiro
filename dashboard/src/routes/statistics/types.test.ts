@@ -41,6 +41,7 @@ function makeBreakdown(
 ): DetailedStatisticsBreakdown {
   return {
     name: 'unknown',
+    is_embedding: false,
     request_count: 0,
     input_tokens: 0,
     output_tokens: 0,
@@ -70,6 +71,11 @@ describe('DetailedStatistics 类型契约', () => {
     const chat: DetailedChatStatistics = { name: '空聊天', message_count: 0 }
     const item: DetailedDistributionItem = { name: '空分布', value: 0 }
     const distributions: DetailedStatisticsDistributions = {
+      owner_tokens: [],
+      model_tokens: [],
+      module_tokens: [],
+      request_type_tokens: [],
+      chat_tokens: [],
       owner_costs: [],
       model_costs: [item],
       module_costs: [],

@@ -5,6 +5,8 @@ from typing import Optional
 from sqlalchemy import Boolean, Column, DateTime, Enum as SQLEnum, Float, Index, Integer, String, Text, UniqueConstraint
 from sqlmodel import Field, LargeBinary, SQLModel
 
+from src.files.models import FileAsset, FileBinding, FileParse  # noqa: F401 -- 注册文件服务模型
+
 
 class ImageType(str, Enum):
     EMOJI = "emoji"
@@ -29,8 +31,12 @@ class Messages(SQLModel, table=True):
 
     # 消息元数据
     message_id: str = Field(index=True, max_length=255)  # 消息id
-    timestamp: datetime = Field(sa_column=Column(DateTime))  # 消息时间，单位为秒
+    timestamp: datetime = Field(sa_column=Column(DateTime))  # 上游消息时间，保留原始精度
+    received_at: Optional[datetime] = Field(default=None, sa_column=Column(DateTime, nullable=True, index=True))
+    # 主程序实际接收时间，保留微秒；旧消息与出站消息不补造接收时间。
     platform: str = Field(index=True, max_length=100)  # 顶层平台字段
+    account_id: Optional[str] = Field(default=None, max_length=255, nullable=True)  # 机器人账号归属
+    scope: Optional[str] = Field(default=None, max_length=255, nullable=True)  # 路由作用域
     # 消息发送者信息
     user_id: str = Field(index=True, max_length=255)  # 发送者用户id
     user_nickname: str = Field(index=True, max_length=255)  # 发送者昵称
@@ -58,6 +64,22 @@ class Messages(SQLModel, table=True):
     additional_config: Optional[str] = Field(default=None)  # 额外配置，JSON格式存储
     reply_frequency: Optional[float] = Field(default=None, sa_column=Column(Float, nullable=True))
     # 消息发生时当前会话的生效回复频率；无法解析时为空
+
+
+class ModelTaskUsage(SQLModel, table=True):
+    """模型任务的分钟级调用汇总，包含失败尝试，不保存请求内容。"""
+
+    __tablename__ = "model_task_usage"  # type: ignore
+
+    # 与历史数据及统计查询保持本地无时区时间，避免依赖 SQLModel 的默认 UTC 类型。
+    bucket_time: datetime = Field(primary_key=True, index=True, sa_type=DateTime(timezone=False))
+    task_name: str = Field(primary_key=True, max_length=100)
+    model_name: str = Field(primary_key=True, max_length=255)
+    model_identifier: str = Field(primary_key=True, max_length=255)
+    provider_name: str = Field(primary_key=True, max_length=255)
+    request_count: int = Field(default=0)
+    failure_count: int = Field(default=0)
+    success_duration: float = Field(default=0.0)
 
 
 class ModelUsage(SQLModel, table=True):
@@ -165,41 +187,6 @@ class MaisakaMonitorEventRecord(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.now, sa_column=Column(DateTime))
 
 
-class MaisakaReplyEffect(SQLModel, table=True):
-    """可供 WebUI 聚合查询的 MaiSaka 回复效果记录。"""
-
-    __tablename__ = "maisaka_reply_effects"  # type: ignore
-    __table_args__ = (
-        Index("ix_reply_effect_session_finalized", "session_id", "finalized_at"),
-        Index("ix_reply_effect_strategy_finalized", "strategy_primary", "finalized_at"),
-        Index("ix_reply_effect_model_prompt", "model_name", "prompt_fingerprint"),
-        Index("ix_reply_effect_request_fingerprint", "request_fingerprint"),
-    )
-
-    effect_id: str = Field(primary_key=True, max_length=36)
-    session_id: str = Field(index=True, max_length=255)
-    session_name: str = Field(default="", max_length=255)
-    chat_type: str = Field(default="group", index=True, max_length=20)
-    status: str = Field(index=True, max_length=30)
-    created_at: datetime = Field(sa_column=Column(DateTime, index=True))
-    finalized_at: Optional[datetime] = Field(default=None, sa_column=Column(DateTime, index=True, nullable=True))
-    strategy_primary: str = Field(default="other", index=True, max_length=40)
-    model_name: str = Field(default="", index=True, max_length=255)
-    request_fingerprint: str = Field(default="", index=True, max_length=64)
-    prompt_fingerprint: str = Field(default="", index=True, max_length=64)
-    # ORM 使用统一命名，物理列沿用 scorer_version 以避免重建回复效果表。
-    evaluation_version: int = Field(
-        default=2,
-        sa_column=Column("scorer_version", Integer, nullable=False, index=True),
-    )
-    response_score: Optional[float] = Field(default=None, sa_column=Column(Float, nullable=True))
-    reception_score: Optional[float] = Field(default=None, sa_column=Column(Float, nullable=True))
-    conversation_score: Optional[float] = Field(default=None, sa_column=Column(Float, nullable=True))
-    raw_score: Optional[float] = Field(default=None, sa_column=Column(Float, nullable=True))
-    relative_score: Optional[float] = Field(default=None, sa_column=Column(Float, nullable=True))
-    confidence: float = Field(default=0.0, sa_column=Column(Float, nullable=False, server_default="0"))
-    record_json: str = Field(default="{}", sa_column=Column(Text, nullable=False))
-    record_blob: Optional[bytes] = Field(default=None, sa_column=Column(LargeBinary, nullable=True))
 
 
 class OneTimeMaintenanceTask(SQLModel, table=True):
@@ -353,116 +340,6 @@ class Expression(SQLModel, table=True):
     modified_by: Optional[ModifiedBy] = Field(
         default=None, sa_column=Column(SQLEnum(ModifiedBy), nullable=True)
     )  # 最后修改者，标记用户或AI，为空表示暂无修改来源
-
-
-class BehaviorExperiencePath(SQLModel, table=True):
-    """可反馈的行为经验路径：场景簇 -> 行为动作 -> 结果。"""
-
-    __tablename__ = "behavior_experience_paths"  # type: ignore
-    __table_args__ = (
-        UniqueConstraint(
-            "session_id",
-            "scene_cluster_id",
-            "action_id",
-            "outcome_id",
-            "actor_type",
-            "learning_type",
-            name="uq_behavior_experience_path_scope_cluster_action_outcome_actor",
-        ),
-        Index("ix_behavior_experience_paths_session_enabled", "session_id", "enabled"),
-        Index("ix_behavior_experience_paths_cluster", "scene_cluster_id"),
-        Index("ix_behavior_experience_paths_learning_type", "learning_type"),
-        Index("ix_behavior_experience_paths_actor_type", "actor_type"),
-        Index("ix_behavior_experience_paths_action", "action_id"),
-        Index("ix_behavior_experience_paths_outcome", "outcome_id"),
-    )
-
-    id: Optional[int] = Field(default=None, primary_key=True)
-    session_id: Optional[str] = Field(default=None, max_length=255, nullable=True, index=True)
-    scene_cluster_id: int = Field(index=True)
-    action_id: int = Field(index=True)
-    outcome_id: int = Field(index=True)
-    actor_type: str = Field(default="other_user", max_length=40)
-    learning_type: str = Field(default="observed_behavior", max_length=40)
-    evidence_list: str = Field(default="[]", sa_column=Column(Text, nullable=False))
-    feedback_list: str = Field(default="[]", sa_column=Column(Text, nullable=False))
-    count: int = Field(default=0)
-    activation_count: int = Field(default=0)
-    success_count: int = Field(default=0)
-    failure_count: int = Field(default=0)
-    score: float = Field(default=0.0, sa_column=Column(Float, nullable=False, server_default="0"))
-    enabled: bool = Field(default=True, sa_column=Column(Boolean, nullable=False, server_default="1"))
-
-    last_active_time: datetime = Field(default_factory=datetime.now, sa_column=Column(DateTime, index=True))
-    last_feedback_time: Optional[datetime] = Field(default=None, sa_column=Column(DateTime, nullable=True))
-    create_time: datetime = Field(default_factory=datetime.now, sa_column=Column(DateTime))
-    update_time: datetime = Field(default_factory=datetime.now, sa_column=Column(DateTime, index=True))
-
-
-class BehaviorSceneCluster(SQLModel, table=True):
-    """行为场景簇，用 tag 概率分布描述一类可触发行为分支的场景。"""
-
-    __tablename__ = "behavior_scene_clusters"  # type: ignore
-    __table_args__ = (
-        Index("ix_behavior_scene_clusters_session_id", "session_id"),
-    )
-
-    id: Optional[int] = Field(default=None, primary_key=True)
-    session_id: Optional[str] = Field(default=None, max_length=255, nullable=True)
-    tag_distribution: str = Field(default="[]", sa_column=Column(Text, nullable=False))
-    source_count: int = Field(default=0)
-    update_time: datetime = Field(default_factory=datetime.now, sa_column=Column(DateTime, index=True))
-
-
-class BehaviorSceneTagCluster(SQLModel, table=True):
-    """行为场景 tag 簇成员索引，用于将同义 tag 快速归到同一个簇。"""
-
-    __tablename__ = "behavior_scene_tag_clusters"  # type: ignore
-    __table_args__ = (
-        UniqueConstraint("tag_kind", "tag", name="uq_behavior_scene_tag_cluster_kind_tag"),
-        Index("ix_behavior_scene_tag_clusters_kind_cluster", "tag_kind", "cluster_key"),
-    )
-
-    id: Optional[int] = Field(default=None, primary_key=True)
-    tag_kind: str = Field(max_length=40, index=True)
-    tag: str = Field(sa_column=Column(Text, nullable=False))
-    cluster_key: str = Field(sa_column=Column(Text, nullable=False))
-    source_count: int = Field(default=0)
-    update_time: datetime = Field(default_factory=datetime.now, sa_column=Column(DateTime, index=True))
-
-
-class BehaviorAction(SQLModel, table=True):
-    """行为动作文本实体，用于复用动作描述。"""
-
-    __tablename__ = "behavior_actions"  # type: ignore
-    __table_args__ = (
-        UniqueConstraint("session_id", "action_hash", name="uq_behavior_action_scope_hash"),
-    )
-
-    id: Optional[int] = Field(default=None, primary_key=True)
-    session_id: Optional[str] = Field(default=None, max_length=255, nullable=True, index=True)
-    action: str = Field(sa_column=Column(Text, nullable=False))
-    action_hash: str = Field(max_length=64, index=True)
-    source_count: int = Field(default=0)
-    create_time: datetime = Field(default_factory=datetime.now, sa_column=Column(DateTime))
-    update_time: datetime = Field(default_factory=datetime.now, sa_column=Column(DateTime, index=True))
-
-
-class BehaviorOutcome(SQLModel, table=True):
-    """行为结果文本实体，用于复用结果描述。"""
-
-    __tablename__ = "behavior_outcomes"  # type: ignore
-    __table_args__ = (
-        UniqueConstraint("session_id", "outcome_hash", name="uq_behavior_outcome_scope_hash"),
-    )
-
-    id: Optional[int] = Field(default=None, primary_key=True)
-    session_id: Optional[str] = Field(default=None, max_length=255, nullable=True, index=True)
-    outcome: str = Field(sa_column=Column(Text, nullable=False))
-    outcome_hash: str = Field(max_length=64, index=True)
-    source_count: int = Field(default=0)
-    create_time: datetime = Field(default_factory=datetime.now, sa_column=Column(DateTime))
-    update_time: datetime = Field(default_factory=datetime.now, sa_column=Column(DateTime, index=True))
 
 
 class Jargon(SQLModel, table=True):

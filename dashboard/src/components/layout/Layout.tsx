@@ -1,7 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useRouter, useRouterState } from '@tanstack/react-router'
-import { AnimatePresence, motion } from 'motion/react'
+import { motion } from 'motion/react'
 
 import { BackgroundLayer } from '@/components/background-layer'
 import { BackToTop } from '@/components/back-to-top'
@@ -14,6 +14,7 @@ import { useAuthGuard } from '@/hooks/use-auth'
 import { useBackground } from '@/hooks/use-background'
 
 import { TitleBar } from '@/components/electron/TitleBar'
+import { SelfUpdateResultNotifier } from '@/components/self-update-result-notifier'
 import { matchesShortcut } from '@/lib/keyboard'
 import { isElectron } from '@/lib/runtime'
 import { cn } from '@/lib/utils'
@@ -21,10 +22,14 @@ import {
   extensionIcons,
   extensionPath,
   extensionWorkspace,
+  orderedWorkspaceExtensions,
   usePluginWebUI,
   visibleExtensions,
 } from '@/lib/plugin-webui'
 import { Header } from './Header'
+import { MobileNavContext } from './mobile-nav-context'
+import { MobileRouteHeader } from './MobileRouteHeader'
+import { MobileTabBar } from './MobileTabBar'
 import { Sidebar } from './Sidebar'
 import type { LayoutProps, MenuSection, WorkspaceMode } from './types'
 import { useMenuSections } from './use-menu-sections'
@@ -41,11 +46,7 @@ const UpdateNoticeDialog = lazy(() =>
 )
 
 type WorkspaceTransitionStage =
-  | 'idle'
-  | 'page-exit'
-  | 'sidebar-exit'
-  | 'sidebar-enter'
-  | 'page-enter'
+  'idle' | 'page-exit' | 'sidebar-exit' | 'sidebar-enter' | 'page-enter'
 
 function loadStoredBoolean(key: string, fallback: boolean): boolean {
   if (typeof window === 'undefined') {
@@ -67,6 +68,14 @@ export function Layout({ children }: LayoutProps) {
   const announce = useAnnounce()
   const extensionRegistry = usePluginWebUI(!checking)
   const extensions = useMemo(() => visibleExtensions(extensionRegistry), [extensionRegistry])
+  const workspaceExtensions = useMemo(
+    () =>
+      orderedWorkspaceExtensions(
+        extensions,
+        extensionRegistry.preferences.workspaceOrder ?? extensionRegistry.preferences.order
+      ),
+    [extensions, extensionRegistry.preferences]
+  )
   const workspaceForPath = (path: string): WorkspaceMode => {
     const extension = extensions.find((extension) =>
       extension.pages.some(
@@ -81,15 +90,21 @@ export function Layout({ children }: LayoutProps) {
   // 麦麦聊天已并入麦麦设置侧边栏，/chat 属于设置工作区
   const workspaceMode: WorkspaceMode = isLogsPath ? 'logs' : workspaceForPath(pathname)
   const isSettingsWorkspace = workspaceMode !== 'logs'
-  const showBackToTop =
+  // 聊天与规划监控自己管理滚动区域，其余设置页按内容撑高、由 main 滚动
+  const isScrollablePage =
     isSettingsWorkspace && pathname !== '/chat' && pathname !== '/planner-monitor'
+  const showBackToTop = isScrollablePage
 
   const [sidebarOpen, setSidebarOpen] = useState(() =>
     loadStoredBoolean(SIDEBAR_OPEN_STORAGE_KEY, true)
   )
   const [skipSidebarResizeAnimation, setSkipSidebarResizeAnimation] = useState(false)
-  const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [searchOpen, setSearchOpen] = useState(false)
+  const [mobileTabBarHidden, setMobileTabBarHidden] = useState(false)
+  const [mobileHeaderActionsElement, setMobileHeaderActionsElement] = useState<HTMLElement | null>(
+    null
+  )
+  const [mobileTitleOverride, setMobileTitleOverride] = useState<string | null>(null)
   const [topbarCollapsed, setTopbarCollapsed] = useState(() =>
     loadStoredBoolean(TOPBAR_COLLAPSED_STORAGE_KEY, false)
   )
@@ -106,12 +121,14 @@ export function Layout({ children }: LayoutProps) {
   const { theme, setTheme, themeConfig } = useTheme()
   const effectiveSidebarOpen = themeConfig.dashboardStyle !== 'millennium' && sidebarOpen
   const builtInMenuSections = useMenuSections()
+  // 日志工作区在移动端保留麦麦导航，顶栏菜单按钮与其它页面保持一致。
+  const sidebarWorkspaceMode = workspaceMode === 'logs' ? 'settings' : workspaceMode
   const menuSections = useMemo(() => {
     const pluginMenuSections: MenuSection[] = extensions.flatMap((extension) => {
       const pages = extension.pages.filter((page) =>
         page.placement === 'sidebar'
-          ? workspaceMode === 'settings'
-          : workspaceMode === extensionWorkspace(extension.plugin_id)
+          ? sidebarWorkspaceMode === 'settings'
+          : sidebarWorkspaceMode === extensionWorkspace(extension.plugin_id)
       )
       return pages.length
         ? [
@@ -128,7 +145,7 @@ export function Layout({ children }: LayoutProps) {
           ]
         : []
     })
-    return workspaceMode === 'settings'
+    return sidebarWorkspaceMode === 'settings'
       ? [
           ...builtInMenuSections,
           ...(pluginMenuSections.length
@@ -141,7 +158,7 @@ export function Layout({ children }: LayoutProps) {
             : []),
         ]
       : pluginMenuSections
-  }, [builtInMenuSections, extensions, workspaceMode])
+  }, [builtInMenuSections, extensions, sidebarWorkspaceMode])
 
   useEffect(() => {
     shellStateRef.current = { sidebarOpen, topbarCollapsed }
@@ -157,7 +174,6 @@ export function Layout({ children }: LayoutProps) {
         setSkipSidebarResizeAnimation(false)
         setSidebarOpen(false)
         setTopbarCollapsed(true)
-        setMobileMenuOpen(false)
         return
       }
 
@@ -295,7 +311,6 @@ export function Layout({ children }: LayoutProps) {
       return
     }
 
-    setMobileMenuOpen(false)
     setSkipSidebarResizeAnimation(false)
     setWorkspaceTransitionTarget(to === '/logs' ? 'logs' : workspaceForPath(to))
 
@@ -327,6 +342,41 @@ export function Layout({ children }: LayoutProps) {
     workspaceTransitionStage !== 'idle' &&
     workspaceTransitionStage !== 'page-enter'
   const sidebarExiting = workspaceTransitionStage === 'sidebar-exit'
+  // 去往日志工作区时侧栏只滑出、不收布局宽度：顶栏不跟着侧栏位移，切换完成后由日志槽位接管这段宽度。
+  const sidebarKeepsWidth = sidebarExiting && workspaceTransitionTarget === 'logs'
+  // 侧栏滑出/滑入期间顶栏延伸到侧栏下方，侧栏移开时露出的是完整的顶栏而不是页面底色。
+  // 千禧风格的铭牌与顶栏是同一条机壳上沿：顶栏常驻垫在侧栏下方，
+  // 否则非整数缩放下侧栏裁剪边缘的抗锯齿会在两段投影之间透出一条细缝。
+  const sidebarUnderlay =
+    isSettingsWorkspace &&
+    (themeConfig.dashboardStyle === 'millennium' || sidebarKeepsWidth || targetWorkspaceWaiting)
+  // 日志视图切换挂在顶栏里，不随页面容器移动；让它与页面同步退场/入场，避免突兀地出现或消失。
+  const logSwitcherHidden =
+    workspaceTransitionStage !== 'idle' && workspaceTransitionStage !== 'page-enter'
+  // 手机没有桌面工作区顶栏，管理入口必须包含插件的全部页面。
+  const mobileMenuSections = useMemo<MenuSection[]>(() => [
+    ...builtInMenuSections,
+    ...extensions.filter((extension) => extension.pages.length > 0).map((extension) => ({
+      title: extension.workspace_title ?? extension.plugin_id,
+      literalTitle: true,
+      items: extension.pages.map((page) => ({
+        icon: extensionIcons[page.icon],
+        label: page.title,
+        literalLabel: true,
+        path: extensionPath(extension.plugin_id, page.id),
+      })),
+    })),
+  ], [builtInMenuSections, extensions])
+  const mobileNavValue = useMemo(
+    () => ({
+      menuSections: mobileMenuSections,
+      openSearch: () => setSearchOpen(true),
+      setTabBarHidden: setMobileTabBarHidden,
+      headerActionsElement: mobileHeaderActionsElement,
+      setTitleOverride: setMobileTitleOverride,
+    }),
+    [mobileMenuSections, mobileHeaderActionsElement]
+  )
   const handleSidebarFix = () => {
     // 悬浮展开已处于完整宽度；固定时跳过占位宽度过渡，避免已经展开的侧栏出现二次动画。
     setSkipSidebarResizeAnimation(true)
@@ -352,6 +402,7 @@ export function Layout({ children }: LayoutProps) {
       {isElectron() && <TitleBar />}
       <div
         data-dashboard-shell="true"
+        data-dashboard-page-background={pageBg.type}
         className={cn(
           'relative isolate flex h-[100dvh] overflow-hidden overscroll-none',
           isElectron() && 'pt-8'
@@ -364,6 +415,9 @@ export function Layout({ children }: LayoutProps) {
             <motion.div
               key={workspaceMode}
               data-dashboard-sidebar-layout="true"
+              data-dashboard-header-underlay={
+                sidebarUnderlay && !topbarCollapsed ? 'true' : undefined
+              }
               layout={false}
               className={cn(
                 'relative z-40 hidden shrink-0 transition-[width] duration-[220ms] ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none lg:block',
@@ -372,11 +426,12 @@ export function Layout({ children }: LayoutProps) {
               )}
               initial={false}
               style={{
-                width: sidebarExiting
-                  ? 0
-                  : effectiveSidebarOpen
-                    ? 'var(--layout-sidebar-width)'
-                    : 'var(--layout-sidebar-collapsed-width)',
+                width:
+                  sidebarExiting && !sidebarKeepsWidth
+                    ? 0
+                    : effectiveSidebarOpen
+                      ? 'var(--layout-sidebar-width)'
+                      : 'var(--layout-sidebar-collapsed-width)',
               }}
             >
               <motion.div
@@ -388,60 +443,37 @@ export function Layout({ children }: LayoutProps) {
                 <Sidebar
                   menuSections={menuSections}
                   sidebarOpen={effectiveSidebarOpen}
-                  mobileMenuOpen={mobileMenuOpen}
+                  mobileMenuOpen={false}
                   topbarCollapsed={topbarCollapsed}
-                  onMobileMenuClose={() => setMobileMenuOpen(false)}
+                  onMobileMenuClose={() => {}}
                   onSidebarFix={handleSidebarFix}
+                  onSidebarToggle={handleSidebarModeToggle}
                 />
               </motion.div>
             </motion.div>
           )}
 
-          {/* 移动端 Sidebar 走自己的 fixed 定位，通过 mobileMenuOpen 控制显隐 */}
-          {isSettingsWorkspace && (
-            <div className="lg:hidden">
-              <Sidebar
-                menuSections={menuSections}
-                sidebarOpen={effectiveSidebarOpen}
-                mobileMenuOpen={mobileMenuOpen}
-                topbarCollapsed={topbarCollapsed}
-                onMobileMenuClose={() => setMobileMenuOpen(false)}
-                onSidebarFix={handleSidebarFix}
-              />
-            </div>
-          )}
-
-          {/* Mobile overlay */}
-          <AnimatePresence>
-            {isSettingsWorkspace && mobileMenuOpen && (
-              <motion.div
-                aria-hidden="true"
-                className="fixed inset-0 z-40 bg-black/50 lg:hidden"
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
-                transition={{ duration: 0.18 }}
-                onClick={() => setMobileMenuOpen(false)}
-              />
-            )}
-          </AnimatePresence>
           {/* Main content */}
           <motion.div
             layout={false}
-            className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
+            className={cn(
+              'flex min-h-0 min-w-0 flex-1 flex-col',
+              // 顶栏延伸到侧栏下方时不能被本列裁掉；页面内容仍由 main 自己裁剪。
+              sidebarUnderlay ? 'overflow-visible' : 'overflow-hidden'
+            )}
           >
             {/* HTTP 安全警告横幅 */}
             <HttpWarningBanner />
 
             {/* Topbar */}
             <Header
-              extensions={extensions}
+              extensions={workspaceExtensions}
+              logSwitcherHidden={logSwitcherHidden}
+              sidebarUnderlay={sidebarUnderlay}
               sidebarOpen={effectiveSidebarOpen}
-              mobileMenuOpen={mobileMenuOpen}
               searchOpen={searchOpen}
               actualTheme={actualTheme}
               onSidebarToggle={handleSidebarModeToggle}
-              onMobileMenuToggle={() => setMobileMenuOpen(!mobileMenuOpen)}
               onSearchOpenChange={setSearchOpen}
               onThemeChange={setTheme}
               onTopbarToggle={() => setTopbarCollapsed(!topbarCollapsed)}
@@ -457,6 +489,10 @@ export function Layout({ children }: LayoutProps) {
               tabIndex={-1}
               className={cn(
                 'relative isolate min-h-0 flex-1 outline-none',
+                // 移动端给底部标签栏让出位置，高度由标签栏按实际占用写入
+                'max-lg:pb-[var(--mobile-dock-height,0px)]',
+                // 手机上没有顶栏，页面内容自己避开状态栏
+                'max-lg:pt-[env(safe-area-inset-top)]',
                 workspaceTransitionStage !== 'idle'
                   ? 'overflow-hidden'
                   : isSettingsWorkspace
@@ -469,22 +505,58 @@ export function Layout({ children }: LayoutProps) {
                 key={workspaceMode}
                 data-dashboard-workspace-content="true"
                 className={cn(
-                  'relative z-10 h-full min-w-0 origin-bottom will-change-transform',
-                  isSettingsWorkspace && 'min-h-full',
+                  'relative z-10 h-full min-w-0 origin-bottom',
+                  // 手机上页头与页面上下排列，页面占满剩余高度
+                  'max-lg:flex max-lg:flex-col',
+                  // 可滚动工作区在手机上按内容撑高，滚动容器底部的留白才不会被溢出内容越过
+                  isScrollablePage && 'min-h-full max-lg:h-auto',
                   targetWorkspaceWaiting && 'invisible'
                 )}
                 variants={{
-                  initial: { y: '100%' },
-                  animate: { y: 0 },
-                  exit: { y: '100%' },
+                  initial: { y: '100%', willChange: 'transform' },
+                  animate: {
+                    y: 0,
+                    willChange: 'transform',
+                    // 入场结束后释放整页变换层；Motion 也会自动保留 will-change，
+                    // 因此需要显式复原，避免子控件交互时整页内容反复像素对齐。
+                    transitionEnd: { willChange: 'auto' },
+                  },
+                  exit: { y: '100%', willChange: 'transform' },
                 }}
                 initial="initial"
                 animate={pageHidden ? 'exit' : 'animate'}
                 transition={{ duration: 0.28, ease: [0.22, 1, 0.36, 1] }}
               >
-                {children}
+                <MobileNavContext.Provider value={mobileNavValue}>
+                  <div className="shrink-0 lg:hidden">
+                    <MobileRouteHeader
+                      menuSections={mobileMenuSections}
+                      actionsRef={setMobileHeaderActionsElement}
+                      titleOverride={mobileTitleOverride}
+                    />
+                  </div>
+                  {/*
+                    桌面端用 display: contents 让页面直接按原结构布局。
+                    手机上可滚动的工作区让页面按内容撑高，由 main 滚动并在底部给标签栏留白；
+                    聊天、日志等固定高度的工作区则正好占满剩余高度。
+                  */}
+                  <div
+                    className={cn(
+                      'lg:contents',
+                      isScrollablePage ? 'flex-[1_0_auto]' : 'min-h-0 flex-1'
+                    )}
+                  >
+                    {children}
+                  </div>
+                </MobileNavContext.Provider>
               </motion.div>
             </main>
+
+            {/* 移动端底部标签栏，取代侧栏和汉堡菜单 */}
+            <MobileTabBar
+              hidden={mobileTabBarHidden}
+              onSearch={() => setSearchOpen(true)}
+            />
 
             {/* Back to Top Button */}
             {showBackToTop && <BackToTop />}
@@ -494,6 +566,7 @@ export function Layout({ children }: LayoutProps) {
       <Suspense fallback={null}>
         <UpdateNoticeDialog />
       </Suspense>
+      <SelfUpdateResultNotifier />
     </TooltipProvider>
   )
 }

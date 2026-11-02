@@ -3,7 +3,7 @@
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Callable, Iterator, Optional, TextIO
+from typing import Callable, Iterator, Optional, Set, TextIO
 
 import asyncio
 import json
@@ -14,6 +14,7 @@ import time
 import structlog
 import tomlkit
 
+from .paths import get_instance_root
 from .logger_color_and_mapping import MODULE_ALIASES, RESET_COLOR, CONVERTED_MODULE_COLORS as MODULE_COLORS
 
 
@@ -21,7 +22,7 @@ from .logger_color_and_mapping import MODULE_ALIASES, RESET_COLOR, CONVERTED_MOD
 LOG_DIR = Path("logs")
 LOG_DIR.mkdir(exist_ok=True)
 logger_file = Path(__file__).resolve()
-PROJECT_ROOT = logger_file.parent.parent.parent.resolve()
+PROJECT_ROOT = get_instance_root()
 # 全局handler实例，避免重复创建
 _file_handler = None
 _console_handler = None
@@ -113,7 +114,7 @@ def initialize_ws_handler(loop):
     root_logger = logging.getLogger()
     if handler not in root_logger.handlers:
         root_logger.addHandler(handler)
-        print("[日志系统] ✅ WebSocket 日志推送已启用")
+        get_logger("logger").debug("WebSocket 日志推送已启用")
 
 
 class TimestampedFileHandler(logging.Handler):
@@ -205,6 +206,12 @@ class TimestampedFileHandler(logging.Handler):
         super().close()
 
 
+async def stop_ws_broadcasts() -> None:
+    """停止接收日志广播，取消并收齐已创建的任务，早于事件循环关闭。"""
+    if _ws_handler is not None:
+        await _ws_handler.stop()
+
+
 class WebSocketLogHandler(logging.Handler):
     """WebSocket 日志处理器 - 将日志实时推送到前端"""
 
@@ -214,15 +221,16 @@ class WebSocketLogHandler(logging.Handler):
         super().__init__()
         self.loop = loop
         self._initialized = False
+        self._broadcast_tasks: Set[asyncio.Task] = set()
 
     def set_loop(self, loop):
         """设置事件循环"""
         self.loop = loop
         self._initialized = True
 
-    @staticmethod
-    def _consume_broadcast_result(task: asyncio.Task) -> None:
+    def _consume_broadcast_result(self, task: asyncio.Task) -> None:
         """消费日志广播任务异常，避免后台任务异常泄漏到事件循环。"""
+        self._broadcast_tasks.discard(task)
         try:
             task.result()
         except asyncio.CancelledError:
@@ -232,7 +240,7 @@ class WebSocketLogHandler(logging.Handler):
 
     def _schedule_broadcast(self, log_data: dict, target_loop: asyncio.AbstractEventLoop) -> None:
         """在目标事件循环内创建日志广播任务。"""
-        if self.loop is not target_loop or target_loop.is_closed():
+        if not self._initialized or self.loop is not target_loop or target_loop.is_closed():
             return
 
         try:
@@ -244,6 +252,7 @@ class WebSocketLogHandler(logging.Handler):
             except Exception:
                 broadcast_coro.close()
                 raise
+            self._broadcast_tasks.add(task)
             task.add_done_callback(self._consume_broadcast_result)
         except RuntimeError:
             pass
@@ -305,6 +314,16 @@ class WebSocketLogHandler(logging.Handler):
         except Exception:
             # 不要让 WebSocket 错误影响日志系统
             self.handleError(record)
+
+    async def stop(self) -> None:
+        """在所属事件循环中关闭调度入口，并等待已有广播取消完成。"""
+        self._initialized = False
+        self.loop = None
+        tasks = list(self._broadcast_tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     def close(self):
         """关闭 WebSocket 日志推送。"""
@@ -373,10 +392,12 @@ def load_log_config():  # sourcery skip: use-contextlib-suppress
         "suppress_libraries": [
             "faiss",
             "httpx",
+            "httpx2",
             "urllib3",
             "asyncio",
             "websockets",
             "httpcore",
+            "httpcore2",
             "requests",
             "sqlalchemy",
             "openai",

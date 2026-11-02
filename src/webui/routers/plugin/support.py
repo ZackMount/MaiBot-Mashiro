@@ -1,13 +1,14 @@
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple, get_origin
+
+from fastapi import HTTPException
+
 import json
 import os
 import re
 import shutil
 import stat
-from datetime import datetime
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, cast, get_origin
-
-from fastapi import HTTPException
 
 from src.common.logger import get_logger
 from src.core.config_types import ConfigField
@@ -24,7 +25,7 @@ MAX_PLUGIN_README_CHARS = 500000
 
 def require_plugin_token(maibot_session: Optional[str]) -> str:
     token_manager = get_token_manager()
-    if not maibot_session or not token_manager.verify_token(maibot_session):
+    if not maibot_session or not token_manager.verify_cookie_token(maibot_session):
         raise HTTPException(status_code=401, detail="未授权：无效的访问令牌")
     return maibot_session
 
@@ -255,47 +256,14 @@ def load_manifest_json(manifest_path: Path) -> Optional[Dict[str, Any]]:
 
     try:
         with open(manifest_path, "r", encoding="utf-8") as file_obj:
-            return cast(dict[str, Any], json.load(file_obj))
-    except Exception:
+            manifest = json.load(file_obj)
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        logger.warning(f"读取插件 manifest 失败: {manifest_path}", exc_info=True)
         return None
-
-
-def read_plugin_changelog(plugin_path: Path) -> Optional[str]:
-    """读取插件根目录中的更新日志；缺失或不可读时返回 None，不影响插件加载。"""
-    for changelog_name in PLUGIN_CHANGELOG_FILENAMES:
-        changelog_path = resolve_plugin_file_path(plugin_path, changelog_name)
-        if not changelog_path.exists():
-            continue
-        if not changelog_path.is_file():
-            continue
-
-        try:
-            with open(changelog_path, "r", encoding="utf-8") as file_obj:
-                return file_obj.read(MAX_PLUGIN_CHANGELOG_CHARS + 1)[:MAX_PLUGIN_CHANGELOG_CHARS]
-        except Exception as exc:
-            logger.warning(f"读取插件更新日志失败: {changelog_path} ({exc})")
-            return None
-
-    return None
-
-
-def read_plugin_readme(plugin_path: Path) -> Optional[str]:
-    """读取插件根目录中的 README；缺失或不可读时返回 None，不影响插件加载。"""
-    for readme_name in PLUGIN_README_FILENAMES:
-        readme_path = resolve_plugin_file_path(plugin_path, readme_name)
-        if not readme_path.exists():
-            continue
-        if not readme_path.is_file():
-            continue
-
-        try:
-            with open(readme_path, "r", encoding="utf-8") as file_obj:
-                return file_obj.read(MAX_PLUGIN_README_CHARS + 1)[:MAX_PLUGIN_README_CHARS]
-        except Exception as exc:
-            logger.warning(f"读取插件 README 失败: {readme_path} ({exc})")
-            return None
-
-    return None
+    if not isinstance(manifest, dict):
+        logger.warning(f"插件 manifest 顶层必须是 JSON 对象: {manifest_path}")
+        return None
+    return manifest
 
 
 def iter_plugin_directories() -> List[Path]:

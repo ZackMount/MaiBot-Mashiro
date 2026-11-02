@@ -52,6 +52,14 @@ const { toastMock, blockerState, progressClient } = vi.hoisted(() => {
   return { toastMock: vi.fn(), blockerState, progressClient }
 })
 
+vi.mock('@/lib/unified-ws', () => ({
+  unifiedWsClient: {
+    addEventListener: vi.fn(() => vi.fn()),
+    subscribe: vi.fn(async () => ({})),
+    unsubscribe: vi.fn(async () => ({})),
+  },
+}))
+
 vi.mock('@/hooks/use-toast', () => ({ useToast: () => ({ toast: toastMock }) }))
 
 vi.mock('@tanstack/react-router', () => ({
@@ -419,10 +427,12 @@ describe('usePluginList', () => {
     })
   })
 
-  it('checkPluginUpdates 会同时按市场 id 与 manifest.id 建索引，0.0.0 版本视为空', async () => {
+  it.each(['/plugin-config', '/adapter-management'])('%s 共用市场更新检查并按 manifest.id 匹配', async (path) => {
+    window.history.replaceState(null, '', path)
     const plugin = makePlugin('local.weather', {
       manifest: {
         id: 'market.weather',
+        plugin_type: 'adapter',
         name: 'Weather',
         version: '1.0.0',
       },
@@ -551,10 +561,12 @@ describe('usePluginList', () => {
 
   it('派生状态条、标签、分组和熔断统计', async () => {
     const disabled = makePlugin('p.disabled', {
+      load_status: 'disabled',
       enabled: false,
       manifest: { name: 'Disabled' },
     })
     const flaggedDisabled = makePlugin('p.flag', {
+      load_status: 'disabled',
       disabled: true,
       manifest: { name: 'FlagDisabled' },
     })
@@ -674,9 +686,9 @@ describe('usePluginList', () => {
       showsBadge: false,
     })
     expect(result.current.getPluginStatusMeta(loadedFlag)).toEqual({
-      dotClassName: 'bg-emerald-500',
-      label: '加载成功',
-      showsBadge: false,
+      dotClassName: 'bg-slate-500',
+      label: '尚未加载',
+      badgeClassName: 'border-slate-500 text-slate-600',
     })
     expect(result.current.getPluginStatusMeta(failed)).toEqual({
       dotClassName: 'bg-red-500',
@@ -691,13 +703,14 @@ describe('usePluginList', () => {
       'offline',
       'failed',
       'disabled',
+      'not_loaded',
     ])
     expect(result.current.showsCircuitSummary).toBe(true)
     expect(result.current.circuitOpenCount).toBe(2)
     expect(result.current.modernLoadSummaryLabel).toContain('熔断中 2 个')
     expect(result.current.modernLoadSummaryLabel).toContain('已离线 1 个')
     expect(result.current.futureRetroPluginSummaryLabel).toContain('已安装 10 个插件')
-    expect(result.current.loadSuccessCount).toBe(2)
+    expect(result.current.loadSuccessCount).toBe(1)
     expect(result.current.disabledCount).toBe(2)
   })
 

@@ -27,6 +27,8 @@ class MemoryDualVectorStateService(KernelServiceBase):
         return self._dual_vector_pools_config_enabled() and self._dual_vector_pools_ready
 
     def _vectors_root(self) -> Path:
+        if self._active_vector_space_id:
+            return self.data_dir / "vectors" / "spaces" / self._active_vector_space_id
         return self.data_dir / "vectors"
 
     def _paragraph_vector_dir(self) -> Path:
@@ -71,7 +73,10 @@ class MemoryDualVectorStateService(KernelServiceBase):
                 and str(manifest.get("generation_reason", "") or "") == "integrity_recovery"
             )
             if not empty_recovery_generation:
-                logger.warning("双池 ready manifest 缺少可校验 embedding 指纹，保持单池降级")
+                if current_fingerprint is None:
+                    logger.debug("当前 embedding 指纹尚不可用，双池校验等待模型探测")
+                else:
+                    logger.warning("双池 ready manifest 缺少可校验 embedding 指纹，保持单池降级")
                 return False
         if (
             current_fingerprint is not None
@@ -93,9 +98,16 @@ class MemoryDualVectorStateService(KernelServiceBase):
         stats: Dict[str, Dict[str, int]],
         migration_stats: Dict[str, Dict[str, int]],
         generation_reason: str = "",
+        build_fingerprint: Optional[Dict[str, Any]] = None,
     ) -> None:
-        current_dimension = self._current_embedding_status_dimension()
-        embedding_fingerprint = self._current_embedding_fingerprint(dimension=current_dimension)
+        current_dimension = (
+            int(build_fingerprint["dimension"]) if build_fingerprint is not None
+            else self._current_embedding_status_dimension()
+        )
+        embedding_fingerprint = (
+            build_fingerprint if build_fingerprint is not None
+            else self._current_embedding_fingerprint(dimension=current_dimension)
+        )
         payload = {
             "status": "ready",
             "version": 1,
@@ -295,7 +307,13 @@ class MemoryDualVectorStateService(KernelServiceBase):
     def _save_vector_store(self, store: Optional[VectorStore]) -> None:
         if store is None:
             return
-        store.save(embedding_fingerprint=self._current_embedding_fingerprint())
+        if self._vector_rebuild_configuration_key is not None:
+            self._vector_runtime_service._ensure_rebuild_embedding_unchanged()
+        fingerprint = (
+            self._vector_rebuild_fingerprint if self._vector_rebuild_fingerprint is not None
+            else self._current_embedding_fingerprint()
+        )
+        store.save(embedding_fingerprint=fingerprint)
 
     def _reload_dual_vector_stores_from_disk(self) -> bool:
         current_dimension = self._current_embedding_status_dimension()

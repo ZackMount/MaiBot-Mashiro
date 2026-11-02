@@ -16,6 +16,8 @@ from rich.console import Group, RenderableType
 from rich.panel import Panel
 from rich.text import Text
 
+from src.common.logger import get_logger
+from src.common.operation_timing import log_operation, timed_operation
 from src.llm_models.model_client.base_client import GenerationAttempt
 from src.llm_models.payload_content.context_item import (
     AssistantMessageItem,
@@ -42,6 +44,8 @@ from .display_utils import (
 from .preview_path_utils import build_display_path, build_file_uri, REPO_ROOT
 from .prompt_preview_logger import PromptPreviewLogger
 
+logger = get_logger("maisaka_prompt_preview")
+
 DATA_IMAGE_DIR = REPO_ROOT / "data" / "images"
 DATA_EMOJI_DIR = REPO_ROOT / "data" / "emoji"
 DATA_PROMPT_IMAGE_DIR = REPO_ROOT / "data" / "prompt_imgs"
@@ -63,36 +67,9 @@ class PromptPreviewRouteTarget:
 def _build_webui_local_base_url() -> str:
     """构建终端可直接打开的本机 WebUI 地址。"""
 
-    try:
-        from src.config.config import global_config
+    from src.config.startup_bindings import get_local_http_base_url
 
-        host = _select_webui_local_host(global_config.webui.host)
-        port = int(global_config.webui.port or 8001)
-    except Exception:
-        host = "127.0.0.1"
-        port = 8001
-
-    if host in {"0.0.0.0", "::"}:
-        host = "127.0.0.1"
-    if ":" in host and not host.startswith("["):
-        host = f"[{host}]"
-    return f"http://{host}:{port}"
-
-
-def _select_webui_local_host(hosts: Any) -> str:
-    """从 WebUI 监听地址中选择适合终端打开的本机地址。"""
-
-    if isinstance(hosts, str):
-        return hosts.strip() or "127.0.0.1"
-    if isinstance(hosts, list):
-        normalized_hosts = [host.strip() for host in hosts if isinstance(host, str) and host.strip()]
-        if "127.0.0.1" in normalized_hosts:
-            return "127.0.0.1"
-        if "::1" in normalized_hosts:
-            return "::1"
-        if normalized_hosts:
-            return normalized_hosts[0]
-    return "127.0.0.1"
+    return get_local_http_base_url()
 
 
 def _resolve_prompt_preview_route_target(file_path: Path) -> PromptPreviewRouteTarget | None:
@@ -174,6 +151,12 @@ class PromptCLIVisualizer:
         if model_name:
             normalized["model_name"] = model_name
 
+        if isinstance(metadata.get("prompt_cache_reported"), bool):
+            normalized["prompt_cache_reported"] = metadata["prompt_cache_reported"]
+        for key in ("tool_choice", "request_source"):
+            if isinstance(metadata.get(key), str):
+                normalized[key] = metadata[key]
+
         raw_duration_ms = metadata.get("duration_ms")
         if raw_duration_ms is not None:
             try:
@@ -181,7 +164,10 @@ class PromptCLIVisualizer:
             except (TypeError, ValueError):
                 pass
 
-        for token_key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+        for token_key in (
+            "prompt_tokens", "completion_tokens", "total_tokens",
+            "prompt_cache_hit_tokens", "prompt_cache_miss_tokens",
+        ):
             raw_token_count = metadata.get(token_key)
             if isinstance(raw_token_count, int) and not isinstance(raw_token_count, bool):
                 normalized[token_key] = max(raw_token_count, 0)
@@ -468,13 +454,13 @@ class PromptCLIVisualizer:
                 image_pair = cls._extract_image_pair(item)
                 if image_pair is not None:
                     image_format, image_base64 = image_pair
-                    approx_size = max(0, len(str(image_base64)) * 3 // 4)
+                    approx_size = len(image_base64) * 3 // 4
                     parts.append(f"[图片 image/{image_format} {approx_size} B]")
                     continue
                 image_dict_pair = cls._extract_image_dict_pair(item)
                 if image_dict_pair is not None:
                     image_format, image_base64 = image_dict_pair
-                    approx_size = max(0, len(str(image_base64)) * 3 // 4)
+                    approx_size = len(image_base64) * 3 // 4
                     parts.append(f"[图片 image/{image_format} {approx_size} B]")
                     continue
                 if isinstance(item, dict) and item.get("type") == "text" and isinstance(item.get("text"), str):
@@ -547,7 +533,7 @@ class PromptCLIVisualizer:
         """构建结构化 JSON 中的图片引用，避免默认写入大块 base64。"""
 
         normalized_format = cls._normalize_image_format(image_format) or "bin"
-        approx_size = max(0, len(image_base64) * 3 // 4)
+        approx_size = len(image_base64) * 3 // 4
         payload: dict[str, Any] = {
             "type": "image",
             "image_format": normalized_format,
@@ -681,7 +667,7 @@ class PromptCLIVisualizer:
             normalized_value = value.strip()
             if normalized_value.startswith("data:") and ";base64," in normalized_value:
                 header, base64_value = normalized_value.split(",", maxsplit=1)
-                size_bytes = max(0, len(base64_value) * 3 // 4)
+                size_bytes = len(base64_value) * 3 // 4
                 if size_bytes > PROVIDER_RESPONSE_BASE64_OMIT_THRESHOLD_BYTES:
                     media_type = header.removeprefix("data:").split(";", maxsplit=1)[0]
                     return cls._build_omitted_binary_reference(
@@ -693,7 +679,7 @@ class PromptCLIVisualizer:
             if cls._looks_like_large_base64(normalized_value):
                 return cls._build_omitted_binary_reference(
                     normalized_value,
-                    size_bytes=max(0, len(normalized_value) * 3 // 4),
+                    size_bytes=len(normalized_value) * 3 // 4,
                 )
             return value
         if isinstance(value, dict):
@@ -714,7 +700,9 @@ class PromptCLIVisualizer:
         """只接受运行时 Context Items 或已序列化 Item 快照。"""
 
         # 延迟导入以避开 request_snapshot -> model_client -> display 的初始化环。
-        from src.llm_models.request_snapshot import deserialize_context_item_snapshot
+        from src.llm_models.payload_content.context_snapshot import (
+            deserialize_context_item_snapshot,
+        )
 
         normalized_items: list[ContextItem] = []
         for item in items:
@@ -752,7 +740,9 @@ class PromptCLIVisualizer:
     ) -> list[dict[str, Any]]:
         """构建 Item-first 结构化记录；图片只在持久化边界替换为安全引用。"""
 
-        from src.llm_models.request_snapshot import serialize_context_item_snapshot
+        from src.llm_models.payload_content.context_snapshot import (
+            serialize_context_item_snapshot,
+        )
 
         structured_items: list[dict[str, Any]] = []
         for item in items:
@@ -790,6 +780,7 @@ class PromptCLIVisualizer:
         return sanitized_item
 
     @classmethod
+    @timed_operation(logger, "preview.build_structured_preview_payload")
     def _build_structured_preview_payload(
         cls,
         request_items: list[Any],
@@ -901,12 +892,14 @@ class PromptCLIVisualizer:
         category: str,
         payload: dict[str, Any],
     ) -> PromptPreviewAccess:
-        structured_preview_text = json.dumps(
-            payload,
-            ensure_ascii=False,
-            indent=2,
-            default=str,
-        )
+        with log_operation(logger, "preview.serialize", category=category, chat_id=chat_id) as stats:
+            structured_preview_text = json.dumps(
+                payload,
+                ensure_ascii=False,
+                indent=2,
+                default=str,
+            )
+            stats["chars"] = len(structured_preview_text)
         record_path = PromptPreviewLogger.save_preview_file(
             chat_id,
             category,
@@ -926,6 +919,7 @@ class PromptCLIVisualizer:
         )
 
     @classmethod
+    @timed_operation(logger, "preview.build_prompt_preview_access")
     def build_prompt_preview_access(
         cls,
         request_items: list[Any],
@@ -1062,6 +1056,7 @@ class PromptCLIVisualizer:
         ).body
 
     @classmethod
+    @timed_operation(logger, "preview.build_text_preview_access")
     def build_text_preview_access(
         cls,
         content: str,

@@ -1,3 +1,4 @@
+import { Card } from '@/components/ui/card'
 import { AlertTriangle, Database, Download, HardDrive, RefreshCw, RotateCcw, Trash2, Upload } from 'lucide-react'
 import { useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -10,7 +11,7 @@ import { Label } from '@/components/ui/label'
 import { Slider } from '@/components/ui/slider'
 import { Switch } from '@/components/ui/switch'
 import { useToast } from '@/hooks/use-toast'
-import { clearLocalCache, DEFAULT_SETTINGS, exportSettings, formatBytes, getSetting, getStorageUsage, importSettings, resetAllGuidesAndNotices, resetAllSettings, setSetting } from '@/lib/settings-manager'
+import { clearLocalCache, DEFAULT_SETTINGS, exportSettings, formatBytes, getSetting, getStorageUsage, importSettings, resetAllGuidesAndNotices, resetAllNotificationStates, resetAllSettings, setSetting } from '@/lib/settings-manager'
 import { logWebSocket } from '@/lib/log-websocket'
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from '@/components/ui/alert-dialog'
 
@@ -20,6 +21,7 @@ export function OtherTab() {
   const navigate = useNavigate()
   const { toast } = useToast()
   const [isResetting, setIsResetting] = useState(false)
+  const [resetSetupPassword, setResetSetupPassword] = useState(false)
   const [shouldThrowError, setShouldThrowError] = useState(false)
   
   // 性能与存储设置状态
@@ -29,6 +31,7 @@ export function OtherTab() {
   const [dataSyncInterval, setDataSyncInterval] = useState(() => getSetting('dataSyncInterval'))
   const [enableAvatarFetch, setEnableAvatarFetch] = useState(() => getSetting('enableAvatarFetch'))
   const [alwaysShowUpdateNotice, setAlwaysShowUpdateNotice] = useState(() => getSetting('alwaysShowUpdateNotice'))
+  const [alwaysShowUpdateButton, setAlwaysShowUpdateButton] = useState(() => getSetting('alwaysShowUpdateButton'))
   const [storageUsage, setStorageUsage] = useState(() => getStorageUsage())
   
   // 导入/导出状态
@@ -155,6 +158,7 @@ export function OtherTab() {
           setDataSyncInterval(getSetting('dataSyncInterval'))
           setEnableAvatarFetch(getSetting('enableAvatarFetch'))
           setAlwaysShowUpdateNotice(getSetting('alwaysShowUpdateNotice'))
+          setAlwaysShowUpdateButton(getSetting('alwaysShowUpdateButton'))
           refreshStorageUsage()
           
           toast({
@@ -204,6 +208,7 @@ export function OtherTab() {
     setDataSyncInterval(DEFAULT_SETTINGS.dataSyncInterval)
     setEnableAvatarFetch(DEFAULT_SETTINGS.enableAvatarFetch)
     setAlwaysShowUpdateNotice(DEFAULT_SETTINGS.alwaysShowUpdateNotice)
+    setAlwaysShowUpdateButton(DEFAULT_SETTINGS.alwaysShowUpdateButton)
     refreshStorageUsage()
     toast({
       title: t('settings.other.resetDone'),
@@ -220,20 +225,32 @@ export function OtherTab() {
     })
   }
 
+  const handleResetNotificationStates = () => {
+    const clearedCount = resetAllNotificationStates()
+    refreshStorageUsage()
+    toast({
+      title: t('settings.other.notificationsResetDone'),
+      description: t('settings.other.notificationsResetDoneDesc', { count: clearedCount }),
+    })
+  }
+
   const handleResetSetup = async () => {
     setIsResetting(true)
 
     try {
-      // 调用后端API重置首次配置状态
+      // 同一个请求重置向导和可选的密码；后端会续上当前浏览器的登录 Cookie。
       const data = await backendApi.post<{ success: boolean; message?: string }>(
         '/api/webui/setup/reset',
-        { errorMessage: t('settings.other.clearStorageFailed') }
+        {
+          body: { reset_password: resetSetupPassword },
+          errorMessage: t('settings.other.setupResetFailed'),
+        }
       )
 
       if (data.success) {
         toast({
           title: t('settings.other.resetSuccess'),
-          description: t('settings.other.clearStorageSuccess'),
+          description: t(resetSetupPassword ? 'settings.other.setupPasswordResetSuccess' : 'settings.other.setupResetSuccess'),
         })
 
         // 延迟跳转到配置向导
@@ -243,7 +260,7 @@ export function OtherTab() {
       } else {
         toast({
           title: t('settings.other.resetFailed'),
-          description: data.message || t('settings.other.clearStorageFailed'),
+          description: data.message || t('settings.other.setupResetFailed'),
           variant: 'destructive',
         })
       }
@@ -255,7 +272,7 @@ export function OtherTab() {
         description:
           error instanceof ApiError && error.status !== undefined
             ? error.message
-            : t('settings.other.clearStorageFailed'),
+            : t('settings.other.setupResetFailed'),
         variant: 'destructive',
       })
     } finally {
@@ -266,7 +283,7 @@ export function OtherTab() {
   return (
     <div className="space-y-4 sm:space-y-6">
       {/* 展示设置 */}
-      <div className="rounded-lg border bg-card p-4 sm:p-6">
+      <Card className="p-4 sm:p-6">
         <h3 className="text-base sm:text-lg font-semibold mb-3 sm:mb-4">
           {t('settings.other.display')}
         </h3>
@@ -286,10 +303,10 @@ export function OtherTab() {
             aria-label={t('settings.other.enableAvatarFetch')}
           />
         </div>
-      </div>
+      </Card>
 
       {/* 引导与提示 */}
-      <div className="rounded-lg border bg-card p-4 sm:p-6">
+      <Card className="p-4 sm:p-6">
         <h3 className="mb-3 flex items-center gap-2 text-base font-semibold sm:mb-4 sm:text-lg">
           <RotateCcw className="h-5 w-5" />
           {t('settings.other.guidesAndNotices')}
@@ -303,10 +320,10 @@ export function OtherTab() {
             {t('settings.other.resetGuidesAndNotices')}
           </Button>
         </div>
-      </div>
+      </Card>
 
       {/* 性能与存储 */}
-      <div className="rounded-lg border bg-card p-4 sm:p-6">
+      <Card className="p-4 sm:p-6">
         <h3 className="text-base sm:text-lg font-semibold mb-3 sm:mb-4 flex items-center gap-2">
           <Database className="h-5 w-5" />
           {t('settings.other.performance')}
@@ -433,10 +450,10 @@ export function OtherTab() {
             </AlertDialog>
           </div>
         </div>
-      </div>
+      </Card>
 
       {/* 导入/导出设置 */}
-      <div className="rounded-lg border bg-card p-4 sm:p-6">
+      <Card className="p-4 sm:p-6">
         <h3 className="text-base sm:text-lg font-semibold mb-3 sm:mb-4 flex items-center gap-2">
           <Download className="h-5 w-5" />
           {t('settings.other.importExport')}
@@ -501,10 +518,10 @@ export function OtherTab() {
             </AlertDialog>
           </div>
         </div>
-      </div>
+      </Card>
 
       {/* 配置向导 */}
-      <div className="rounded-lg border bg-card p-4 sm:p-6">
+      <Card className="p-4 sm:p-6">
         <h3 className="text-base sm:text-lg font-semibold mb-3 sm:mb-4">{t('settings.other.configWizard')}</h3>
         <div className="space-y-3 sm:space-y-4">
           <div className="space-y-2">
@@ -526,16 +543,31 @@ export function OtherTab() {
                   {t('settings.other.confirmRerunSetupDesc')}
                 </AlertDialogDescription>
               </AlertDialogHeader>
+              <div className="flex items-start justify-between gap-4 rounded-md border p-4">
+                <div className="space-y-2">
+                  <Label htmlFor="reset-setup-password">{t('settings.other.resetSetupPassword')}</Label>
+                  <p id="reset-setup-password-description" className="text-sm text-muted-foreground">
+                    {t('settings.other.resetSetupPasswordDesc')}
+                  </p>
+                </div>
+                <Switch
+                  id="reset-setup-password"
+                  checked={resetSetupPassword}
+                  onCheckedChange={setResetSetupPassword}
+                  aria-describedby="reset-setup-password-description"
+                  disabled={isResetting}
+                />
+              </div>
               <AlertDialogFooter>
                 <AlertDialogCancel>{t('common.cancel')}</AlertDialogCancel>
-                <AlertDialogAction onClick={handleResetSetup}>
+                <AlertDialogAction onClick={handleResetSetup} disabled={isResetting}>
                   {t('settings.other.resetAllSettingsConfirm')}
                 </AlertDialogAction>
               </AlertDialogFooter>
             </AlertDialogContent>
           </AlertDialog>
         </div>
-      </div>
+      </Card>
 
       {/* 开发者工具 */}
       <div className="rounded-lg border border-dashed border-yellow-500/50 bg-yellow-500/5 p-4 sm:p-6">
@@ -564,6 +596,37 @@ export function OtherTab() {
               onCheckedChange={handleAlwaysShowUpdateNoticeChange}
               aria-label={t('settings.other.alwaysShowUpdateNotice')}
             />
+          </div>
+          <div className="flex items-start justify-between gap-4 rounded-lg bg-muted/50 p-3 sm:p-4">
+            <div className="min-w-0 space-y-1">
+              <Label htmlFor="always-show-update-button" className="text-sm font-medium">
+                {t('settings.other.alwaysShowUpdateButton')}
+              </Label>
+              <p className="text-xs text-muted-foreground">
+                {t('settings.other.alwaysShowUpdateButtonDesc')}
+              </p>
+            </div>
+            <Switch
+              id="always-show-update-button"
+              checked={alwaysShowUpdateButton}
+              onCheckedChange={(checked) => {
+                setAlwaysShowUpdateButton(checked)
+                setSetting('alwaysShowUpdateButton', checked)
+              }}
+              aria-label={t('settings.other.alwaysShowUpdateButton')}
+            />
+          </div>
+          <div className="flex items-start justify-between gap-4 rounded-lg bg-muted/50 p-3 sm:p-4">
+            <div className="min-w-0 space-y-1">
+              <p className="text-sm font-medium">{t('settings.other.resetNotificationStates')}</p>
+              <p className="text-xs text-muted-foreground">
+                {t('settings.other.resetNotificationStatesDesc')}
+              </p>
+            </div>
+            <Button variant="outline" size="sm" onClick={handleResetNotificationStates} className="shrink-0 gap-2">
+              <RotateCcw className="h-4 w-4" />
+              {t('settings.other.resetNotificationStatesAction')}
+            </Button>
           </div>
           <AlertDialog>
             <AlertDialogTrigger asChild>

@@ -81,7 +81,6 @@ function createPromptFile(overrides: Partial<ReasoningPromptFile> = {}): Reasoni
     action_preview: null,
     display_title: '标题',
     related_json_paths: [],
-    has_behavior_choice_insert: false,
     model_name: null,
     duration_ms: null,
     prompt_tokens: null,
@@ -199,11 +198,6 @@ describe('getContextItemImages', () => {
 
 describe('formatStageName', () => {
   it.each([
-    ['behavior_consolidator', '行为整合'],
-    ['behavior_feedback', '行为反馈'],
-    ['behavior_learner', '行为学习'],
-    ['behavior_scenario_analyzer', '行为场景分析'],
-    ['behavior_selector', '行为选择'],
     ['emotion', '表情包发送'],
     ['expression_learner', '表达学习'],
     ['expression_selection', '表达选择'],
@@ -212,7 +206,6 @@ describe('formatStageName', () => {
     ['jargon_learning_update', '黑话含义推断'],
     ['llm_error', 'LLM 请求异常'],
     ['planner', '规划器'],
-    ['reply_effect_judge', '回复效果评估'],
     ['replyer', '回复器'],
     ['timing_gate', '时机判断'],
     ['custom_stage', 'custom_stage'],

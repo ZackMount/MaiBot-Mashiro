@@ -1,8 +1,8 @@
 import type { CSSProperties } from 'react'
 import { Link } from '@tanstack/react-router'
-import { AlertCircle, ArrowRight, ExternalLink, Pencil, RefreshCw } from 'lucide-react'
+import { AlertCircle, ArrowRight, ExternalLink, Pencil, RefreshCw, Settings } from 'lucide-react'
 import { motion, useReducedMotion } from 'motion/react'
-import { lazy, Suspense, useCallback, useContext, useEffect, useState } from 'react'
+import { createContext, lazy, memo, Suspense, useCallback, useContext, useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Bar, BarChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 
@@ -10,6 +10,7 @@ import { RestartOverlay } from '@/components/restart-overlay'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { CHART_INITIAL_DIMENSION } from '@/components/ui/chart'
 import { Checkbox } from '@/components/ui/checkbox'
 import {
   Dialog,
@@ -25,6 +26,8 @@ import { Progress } from '@/components/ui/progress'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Skeleton } from '@/components/ui/skeleton'
 import { ThinkingIllustration } from '@/components/ui/thinking-illustration'
+import { MobilePageHeader } from '@/components/layout/MobilePageHeader'
+import type { NewsItem } from '@/lib/news-api'
 import { RestartProvider, useRestart } from '@/lib/restart-context'
 import { ThemeProviderContext } from '@/lib/theme-context'
 import { openUpdateNotice } from '@/lib/update-notice-events'
@@ -38,7 +41,10 @@ import { useLocalCacheMetrics } from './home/hooks/useLocalCacheMetrics'
 import { useMaibotVersion } from './home/hooks/useMaibotVersion'
 import { HitokotoEditorDialog } from './home/HitokotoEditorDialog'
 import { HomeCardManager, type HomeCardDefinition } from './home/HomeCardManager'
-import { NewsCard } from './home/NewsCard'
+import { NewsCard, NewsDialog } from './home/NewsCard'
+import { useNews } from './home/hooks/useNews'
+import { useNewsReadState } from './home/hooks/useNewsReadState'
+import { NewsStrip } from './home/NewsStrip'
 import { usePluginHomeCards } from './home/hooks/usePluginHomeCards'
 import { useQuickShortcuts } from './home/hooks/useQuickShortcuts'
 import { useReviewStats } from './home/hooks/useReviewStats'
@@ -52,7 +58,7 @@ import {
   StatisticsOverviewCard,
   TokenTrendCard,
 } from './home/StatisticsCards'
-import type { TimeSeriesData } from './home/types'
+import type { BotStatus, TimeSeriesData } from './home/types'
 
 const ExpressionReviewer = lazy(() =>
   import('@/components/expression-reviewer').then((module) => ({
@@ -60,12 +66,26 @@ const ExpressionReviewer = lazy(() =>
   }))
 )
 
+const BotRuntimeContext = createContext<{ botStatus: BotStatus | null; isBotStatusLoading: boolean }>({
+  botStatus: null,
+  isBotStatusLoading: true,
+})
+
+// 运行状态单独订阅；轮询只更新状态卡，版本变化才通知首页其余部分。
 // 主导出组件：包装 RestartProvider
 export function IndexPage() {
+  return <RestartProvider><HomeRuntime /></RestartProvider>
+}
+
+// 轮询必须在 RestartProvider 内部，避免同时重建重启上下文、唤醒首页订阅者。
+function HomeRuntime() {
+  const { botStatus, isBotStatusLoading, fetchBotStatus } = useBotStatus()
+  useEffect(() => { void fetchBotStatus(true) }, [fetchBotStatus])
+  const runtime = useMemo(() => ({ botStatus, isBotStatusLoading }), [botStatus, isBotStatusLoading])
   return (
-    <RestartProvider>
-      <IndexPageContent />
-    </RestartProvider>
+    <BotRuntimeContext.Provider value={runtime}>
+      <IndexPageContent botVersion={botStatus?.version} />
+    </BotRuntimeContext.Provider>
   )
 }
 
@@ -119,31 +139,39 @@ function FeatureStatusLight({
 }
 
 function BotStatusFlipCard({
-  botRuntimeLabel,
-  botRuntimeState,
   memoryEnabled,
   onlineData,
-  uptime,
   visualEnabled,
 }: {
-  botRuntimeLabel: string
-  botRuntimeState: BotRuntimeState
   memoryEnabled: boolean
   onlineData: TimeSeriesData[]
-  uptime: string | null
   visualEnabled: boolean
 }) {
   const { i18n, t } = useTranslation()
   const prefersReducedMotion = useReducedMotion()
   const [isFlipped, setIsFlipped] = useState(false)
-  const recentOnlineData = onlineData.slice(-24)
+  const [isFlipping, setIsFlipping] = useState(false)
+  const { botStatus, isBotStatusLoading } = useContext(BotRuntimeContext)
+  const botRuntimeState: BotRuntimeState =
+    isBotStatusLoading && !botStatus ? 'loading'
+      : botStatus?.running === true ? 'running' : botStatus ? 'stopped' : 'unknown'
+  const botRuntimeLabel = t(`home.botStatus.${botRuntimeState}`)
+  const uptime = botStatus ? t('home.botStatus.uptime', {
+    time: t('home.time.hoursMinutes', {
+      hours: Math.floor(botStatus.uptime / 3600),
+      minutes: Math.floor((botStatus.uptime % 3600) / 60),
+    }),
+  }) : null
+  // 状态轮询不改变在线曲线的数据引用，避免重新启动图表动画。
+  const recentOnlineData = useMemo(() => onlineData.slice(-24), [onlineData])
   const recentOnlineSeconds = recentOnlineData.reduce(
     (total, item) => total + item.online_seconds,
     0
   )
   const formatOnlineTime = (seconds: number) => {
-    const hours = Math.floor(seconds / 3600)
-    const minutes = Math.round((seconds % 3600) / 60)
+    const totalMinutes = Math.round(seconds / 60)
+    const hours = Math.floor(totalMinutes / 60)
+    const minutes = totalMinutes % 60
     return t('home.time.hoursMinutes', { hours, minutes })
   }
   const faceClassName =
@@ -158,17 +186,22 @@ function BotStatusFlipCard({
       aria-label={t(isFlipped ? 'home.botStatus.showStatus' : 'home.botStatus.showRecentOnline')}
       aria-pressed={isFlipped}
       className="group focus-visible:ring-primary/55 focus-visible:ring-offset-background relative isolate block h-full min-h-[136px] w-full overflow-visible rounded-lg text-left [perspective:900px] focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none"
-      onClick={() => setIsFlipped((current) => !current)}
+      onClick={() => {
+        setIsFlipping(!prefersReducedMotion)
+        setIsFlipped((current) => !current)
+      }}
     >
       <motion.div
         data-maibot-status-rotor="true"
-        className="relative z-10 h-full min-h-[136px] w-full [transform-style:preserve-3d] [will-change:transform]"
+        className="relative z-10 h-full min-h-[136px] w-full [will-change:transform] [transform-style:preserve-3d]"
         animate={{ rotateY: prefersReducedMotion ? 0 : isFlipped ? 180 : 0 }}
         transition={{ duration: prefersReducedMotion ? 0 : 0.46, ease: [0.22, 1, 0.36, 1] }}
+        onAnimationComplete={() => setIsFlipping(false)}
       >
         <motion.div
           data-maibot-status-face="front"
           aria-hidden={isFlipped}
+          inert={isFlipped || isFlipping}
           className={faceClassName}
           animate={{ opacity: prefersReducedMotion && isFlipped ? 0 : 1 }}
           transition={{ duration: prefersReducedMotion ? 0.12 : 0 }}
@@ -236,6 +269,7 @@ function BotStatusFlipCard({
         <motion.div
           data-maibot-status-face="back"
           aria-hidden={!isFlipped}
+          inert={!isFlipped || isFlipping}
           className={faceClassName}
           style={{ transform: prefersReducedMotion ? 'none' : 'rotateY(180deg)' }}
           animate={{ opacity: prefersReducedMotion && !isFlipped ? 0 : 1 }}
@@ -259,33 +293,37 @@ function BotStatusFlipCard({
                 aria-label={t('home.botStatus.recentOnlineChart')}
                 className="mt-1 min-h-0 flex-1"
               >
-                <ResponsiveContainer width="100%" height="100%">
+                <ResponsiveContainer width="100%" height="100%" initialDimension={CHART_INITIAL_DIMENSION}>
                   <BarChart
                     data={recentOnlineData}
                     margin={{ top: 5, right: 0, bottom: 0, left: 0 }}
                   >
                     <XAxis dataKey="timestamp" hide />
                     <YAxis domain={[0, 3600]} hide />
-                    <Tooltip
-                      cursor={{ fill: 'hsl(var(--muted) / 0.32)' }}
-                      contentStyle={{
-                        background: 'hsl(var(--popover))',
-                        border: '1px solid hsl(var(--border))',
-                        borderRadius: 8,
-                        color: 'hsl(var(--popover-foreground))',
-                        fontSize: 11,
-                      }}
-                      formatter={(value) => [
-                        formatOnlineTime(Number(value)),
-                        t('home.botStatus.online'),
-                      ]}
-                      labelFormatter={(value) =>
-                        new Intl.DateTimeFormat(i18n.resolvedLanguage ?? i18n.language, {
-                          hour: '2-digit',
-                          minute: '2-digit',
-                        }).format(new Date(String(value)))
-                      }
-                    />
+                    {/* Tooltip 按变换后的 DOM 尺寸反复测量、定位，3D 翻转中会形成更新循环。
+                        只在背面翻转完成后挂载；active=false 仍会测量，不能阻止循环。 */}
+                    {isFlipped && !isFlipping && (
+                      <Tooltip
+                        cursor={{ fill: 'hsl(var(--muted) / 0.32)' }}
+                        contentStyle={{
+                          background: 'hsl(var(--popover))',
+                          border: '1px solid hsl(var(--border))',
+                          borderRadius: 8,
+                          color: 'hsl(var(--popover-foreground))',
+                          fontSize: 11,
+                        }}
+                        formatter={(value) => [
+                          formatOnlineTime(Number(value)),
+                          t('home.botStatus.online'),
+                        ]}
+                        labelFormatter={(value) =>
+                          new Intl.DateTimeFormat(i18n.resolvedLanguage ?? i18n.language, {
+                            hour: '2-digit',
+                            minute: '2-digit',
+                          }).format(new Date(String(value)))
+                        }
+                      />
+                    )}
                     <Bar
                       dataKey="online_seconds"
                       fill="hsl(var(--primary) / 0.68)"
@@ -323,24 +361,8 @@ function formatStorageBytes(bytes: number): string {
   return `${value.toFixed(value >= 10 || unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`
 }
 
-function compareVersions(left: string, right: string): number {
-  const parseVersion = (version: string): number[] => {
-    const match = version.replace(/^v/i, '').match(/^\d+(?:\.\d+)*/)
-    return (match?.[0] ?? '0').split('.').map((part) => Number.parseInt(part, 10))
-  }
-  const leftParts = parseVersion(left)
-  const rightParts = parseVersion(right)
-  const length = Math.max(leftParts.length, rightParts.length)
-
-  for (let index = 0; index < length; index += 1) {
-    const difference = (leftParts[index] ?? 0) - (rightParts[index] ?? 0)
-    if (difference !== 0) return difference
-  }
-  return 0
-}
-
-function IndexPageContent() {
-  const { t } = useTranslation()
+const IndexPageContent = memo(function IndexPageContent({ botVersion }: { botVersion: string | undefined }) {
+  const { i18n, t } = useTranslation()
   const { themeConfig } = useContext(ThemeProviderContext)
   const { triggerRestart, isRestarting } = useRestart()
 
@@ -352,7 +374,6 @@ function IndexPageContent() {
     loadingProgress,
     fetchDashboardData,
   } = useDashboardData()
-  const { botStatus, isBotStatusLoading, fetchBotStatus } = useBotStatus()
   const { featureStatus, fetchFeatureStatus } = useFeatureStatus()
   const { localCacheStats, isLocalCacheStatsLoading, fetchLocalCacheStats } = useLocalCacheMetrics()
   const { uncheckedCount, fetchReviewStats } = useReviewStats()
@@ -360,12 +381,18 @@ function IndexPageContent() {
     hitokoto,
     hitokotoLoading,
     hitokotoSettings,
-    maibotStableRelease,
     versionCompatibility,
     fetchHitokoto,
     saveHitokotoSettings,
   } = useMaibotVersion()
   const { pluginHomeCards } = usePluginHomeCards()
+  const newsState = useNews()
+  const newsReadState = useNewsReadState()
+  const [selectedNews, setSelectedNews] = useState<NewsItem | null>(null)
+  const openNews = (item: NewsItem) => {
+    newsReadState.markRead(item)
+    setSelectedNews(item)
+  }
 
   const [isReviewerOpen, setIsReviewerOpen] = useState(false)
   const [hitokotoEditorOpen, setHitokotoEditorOpen] = useState(false)
@@ -400,7 +427,6 @@ function IndexPageContent() {
     /* eslint-disable react-hooks/set-state-in-effect -- 挂载时拉取仪表盘各数据源 */
     fetchDashboardData()
     fetchHitokoto()
-    fetchBotStatus(true)
     fetchFeatureStatus()
     fetchLocalCacheStats()
     fetchReviewStats()
@@ -408,7 +434,6 @@ function IndexPageContent() {
   }, [
     fetchDashboardData,
     fetchHitokoto,
-    fetchBotStatus,
     fetchFeatureStatus,
     fetchLocalCacheStats,
     fetchReviewStats,
@@ -448,13 +473,6 @@ function IndexPageContent() {
     )
   }
 
-  // 格式化时间显示
-  const formatTime = (seconds: number) => {
-    const hours = Math.floor(seconds / 3600)
-    const minutes = Math.floor((seconds % 3600) / 60)
-    return t('home.time.hoursMinutes', { hours, minutes })
-  }
-
   const localCacheDirectories = localCacheStats?.directories ?? []
   const imageCacheDirectory = localCacheDirectories.find((item) => item.key === 'images')
   const emojiCacheDirectory = localCacheDirectories.find((item) => item.key === 'emoji')
@@ -474,15 +492,6 @@ function IndexPageContent() {
   )
   const totalStorageTableCount = localCacheStats?.database.tables.length ?? 0
   const hasLocalCacheStats = localCacheStats !== null
-  const botRuntimeState: BotRuntimeState =
-    isBotStatusLoading && !botStatus
-      ? 'loading'
-      : botStatus?.running === true
-        ? 'running'
-        : botStatus
-          ? 'stopped'
-          : 'unknown'
-  const botRuntimeLabel = t(`home.botStatus.${botRuntimeState}`)
   const storageDetails = [
     {
       key: 'images',
@@ -525,13 +534,8 @@ function IndexPageContent() {
       source: 'builtin',
       render: () => (
         <BotStatusFlipCard
-          botRuntimeLabel={botRuntimeLabel}
-          botRuntimeState={botRuntimeState}
           memoryEnabled={featureStatus.memoryEnabled}
           onlineData={dashboardData.hourly_data}
-          uptime={
-            botStatus ? t('home.botStatus.uptime', { time: formatTime(botStatus.uptime) }) : null
-          }
           visualEnabled={featureStatus.visualEnabled}
         />
       ),
@@ -546,7 +550,10 @@ function IndexPageContent() {
       source: 'builtin',
       render: () => (
         <Card className="h-full">
-          <CardContent data-home-titleless-content="true" className="relative pt-4 sm:pt-5">
+          <CardContent
+            data-home-titleless-content="true"
+            className="relative flex flex-col justify-center py-3 sm:py-3"
+          >
             {selectedQuickShortcuts.length === 0 ? (
               <div className="text-muted-foreground flex flex-col gap-3 rounded-lg border border-dashed p-4 text-sm sm:flex-row sm:items-center sm:justify-between">
                 <span>{t('home.quickActions.empty')}</span>
@@ -581,6 +588,9 @@ function IndexPageContent() {
                   )
 
                   if (shortcut.href) {
+                    const internalUrl = shortcut.external
+                      ? null
+                      : new URL(shortcut.href, window.location.origin)
                     return (
                       <Button
                         key={shortcut.id}
@@ -589,14 +599,25 @@ function IndexPageContent() {
                         asChild
                         className="max-w-[14rem] justify-start gap-2 overflow-hidden sm:max-w-[18rem]"
                       >
-                        <a
-                          href={shortcut.href}
-                          target={shortcut.external ? '_blank' : undefined}
-                          rel={shortcut.external ? 'noopener noreferrer' : undefined}
-                          title={shortcut.label}
-                        >
-                          {content}
-                        </a>
+                        {internalUrl ? (
+                          <Link
+                            to={internalUrl.pathname}
+                            search={Object.fromEntries(internalUrl.searchParams)}
+                            hash={internalUrl.hash.slice(1)}
+                            title={shortcut.label}
+                          >
+                            {content}
+                          </Link>
+                        ) : (
+                          <a
+                            href={shortcut.href}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            title={shortcut.label}
+                          >
+                            {content}
+                          </a>
+                        )}
                       </Button>
                     )
                   }
@@ -641,7 +662,7 @@ function IndexPageContent() {
       preferredHeight: 'low',
       category: 'status',
       source: 'builtin',
-      render: () => <NewsCard />,
+      render: () => <NewsCard newsState={newsState} readState={newsReadState} onOpen={openNews} />,
     },
     {
       id: 'builtin:prompt-cache',
@@ -825,15 +846,7 @@ function IndexPageContent() {
                           )}
                         </>
                         {storageDisplayMode === 'size' && (
-                          <div
-                            data-home-storage-progress="true"
-                            className="bg-muted col-span-3 h-1.5 min-w-0 overflow-hidden rounded-full"
-                          >
-                            <div
-                              className="bg-primary h-full rounded-full transition-all"
-                              style={{ width: `${visiblePercent}%` }}
-                            />
-                          </div>
+                          <Progress value={visiblePercent} aria-label={`${item.label}存储占用`} className="col-span-3 min-w-0" />
                         )}
                       </div>
                     )
@@ -920,15 +933,15 @@ function IndexPageContent() {
     ...homeCards.filter((card) => card.id === hitokotoCardId),
     ...homeCards.filter((card) => !firstRowCardIds.includes(card.id) && card.id !== hitokotoCardId),
   ]
-  const maibotUpdateAvailable = Boolean(
-    botStatus?.version &&
-    maibotStableRelease &&
-    compareVersions(maibotStableRelease.version, botStatus.version) > 0
-  )
   const versionsMismatch =
     versionCompatibility?.status !== undefined && versionCompatibility.status !== 'compatible'
+  // 移动端由 Layout 的 main 滚动，内层按内容撑高并允许滚动传递，避免拦截触摸滑动。
   return (
-    <ScrollArea className="h-full" scrollbars="vertical">
+    <ScrollArea
+      className="h-full max-lg:h-auto"
+      viewportClassName="max-lg:h-auto max-lg:overscroll-auto"
+      scrollbars="vertical"
+    >
       <div data-home-page="true" className="space-y-2 p-4 sm:space-y-4 sm:p-6">
         {dashboardError && (
           <Card className="border-destructive/50 bg-destructive/5">
@@ -949,6 +962,24 @@ function IndexPageContent() {
             </CardContent>
           </Card>
         )}
+        <MobilePageHeader
+          eyebrow={new Intl.DateTimeFormat(i18n.resolvedLanguage ?? i18n.language, {
+            month: 'long',
+            day: 'numeric',
+            weekday: 'long',
+          }).format(new Date())}
+          title={t('home.mobile.title')}
+          trailing={
+            <Link
+              to="/settings"
+              data-home-avatar-entry="true"
+              aria-label={t('home.mobile.openSettings')}
+              className="bg-muted text-foreground flex h-11 w-11 shrink-0 items-center justify-center rounded-full"
+            >
+              <Settings className="h-[22px] w-[22px]" strokeWidth={1.7} aria-hidden="true" />
+            </Link>
+          }
+        />
         <div
           data-home-command-strip="true"
           className={cn(
@@ -966,7 +997,7 @@ function IndexPageContent() {
               {t('home.versionCard.maibotVersion')}
             </span>
             <span className="text-base">
-              {botStatus?.version ? `V${botStatus.version}` : t('home.versionCard.unknown')}
+              {botVersion ? `V${botVersion}` : t('home.versionCard.unknown')}
             </span>
           </button>
           <button
@@ -980,18 +1011,8 @@ function IndexPageContent() {
             </span>
             <span className="text-base">V{APP_VERSION}</span>
           </button>
-          {maibotUpdateAvailable && maibotStableRelease && (
-            <a
-              href={maibotStableRelease.url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex items-center gap-1.5 text-sm text-sky-600 hover:underline dark:text-sky-400"
-            >
-              {t('home.versionCard.updateAvailable')} V{maibotStableRelease.version}
-              <ExternalLink className="h-3.5 w-3.5" />
-            </a>
-          )}
           {versionsMismatch && <span className="text-sm">{t('home.versionCard.mismatch')}</span>}
+          <NewsStrip news={newsState.news} readState={newsReadState} onOpen={openNews} />
           <span
             aria-hidden="true"
             data-home-version-stripes="true"
@@ -1002,12 +1023,14 @@ function IndexPageContent() {
               viewBox="0 0 1100 180"
               preserveAspectRatio="none"
             >
-              <path data-spectrum-line="green" d="M0 84 H740 C850 84 880 18 1010 18 H1100" />
+              <path data-spectrum-line="green" d="M0 84 H1100" />
               <path data-spectrum-line="gold" d="M0 90 H1100" />
-              <path data-spectrum-line="orange" d="M0 96 H740 C850 96 880 162 1010 162 H1100" />
+              <path data-spectrum-line="orange" d="M0 96 H1100" />
             </svg>
           </span>
         </div>
+
+        <NewsDialog selectedNews={selectedNews} onClose={() => setSelectedNews(null)} />
 
         <HomeCardManager
           cards={orderedHomeCards}
@@ -1114,4 +1137,4 @@ function IndexPageContent() {
       </div>
     </ScrollArea>
   )
-}
+})

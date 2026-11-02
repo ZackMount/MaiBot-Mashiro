@@ -4,6 +4,8 @@ from typing import Awaitable, Callable, Optional
 
 from sqlmodel import select
 
+import asyncio
+
 from src.chat.message_receive.message import SessionMessage
 from src.common.data_models.message_component_data_model import EmojiComponent, ForwardNodeComponent, ImageComponent
 from src.common.database.database import get_db_session
@@ -12,7 +14,7 @@ from src.common.logger import get_logger
 from src.config.config import config_manager
 
 from src.maisaka.context.message_adapter import build_visible_text_from_sequence
-from src.maisaka.context.messages import LLMContextMessage, SessionBackedMessage
+from src.maisaka.context.messages import ContentContextMessage, InternalContextMessage, LLMContextMessage, SessionBackedMessage
 
 logger = get_logger("maisaka_chat_history_visual_refresher")
 
@@ -33,12 +35,13 @@ async def refresh_chat_history_visual_placeholders(
 
     refreshed_count = 0
     for index, history_message in enumerate(chat_history):
-        if not isinstance(history_message, SessionBackedMessage):
+        if not isinstance(history_message, ContentContextMessage):
             continue
 
-        original_message = history_message.original_message
-        if original_message is None:
-            visual_components_updated = _refresh_pending_visual_components(history_message.raw_message.components)
+        if isinstance(history_message, InternalContextMessage):
+            visual_components_updated = await asyncio.to_thread(
+                _refresh_pending_visual_components, history_message.raw_message.components
+            )
             if not visual_components_updated:
                 continue
 
@@ -46,7 +49,12 @@ async def refresh_chat_history_visual_placeholders(
             refreshed_count += 1
             continue
 
-        visual_components_updated = _refresh_pending_visual_components(original_message.raw_message.components)
+        if not isinstance(history_message, SessionBackedMessage):
+            continue
+        original_message = history_message.original_message
+        visual_components_updated = await asyncio.to_thread(
+            _refresh_pending_visual_components, history_message.media_sequence.components
+        )
         if visual_components_updated:
             await original_message.process(
                 enable_heavy_media_analysis=False,
@@ -76,14 +84,10 @@ def has_pending_image_recognition(chat_history: list[LLMContextMessage]) -> bool
         return False
 
     for history_message in chat_history:
-        if not isinstance(history_message, SessionBackedMessage):
+        if not isinstance(history_message, ContentContextMessage):
             continue
 
-        original_message = history_message.original_message
-        if original_message is None:
-            components = history_message.raw_message.components
-        else:
-            components = original_message.raw_message.components
+        components = history_message.media_sequence.components
 
         if _has_pending_image_component(components):
             return True
@@ -103,14 +107,10 @@ def log_pending_image_recognition_before_text_planner(
 
     pending_image_hashes: set[str] = set()
     for history_message in chat_history:
-        if not isinstance(history_message, SessionBackedMessage):
+        if not isinstance(history_message, ContentContextMessage):
             continue
 
-        original_message = history_message.original_message
-        if original_message is None:
-            components = history_message.raw_message.components
-        else:
-            components = original_message.raw_message.components
+        components = history_message.media_sequence.components
 
         pending_image_hashes.update(_collect_pending_image_hashes(components))
 

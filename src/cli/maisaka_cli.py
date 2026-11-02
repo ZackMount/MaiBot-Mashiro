@@ -17,6 +17,7 @@ from src.chat.message_receive.message import SessionMessage
 from src.common.data_models.mai_message_data_model import MessageInfo, UserInfo
 from src.common.data_models.message_component_data_model import MessageSequence, TextComponent
 from src.config.config import config_manager
+from src.core.local_operator import MAISAKA_CLI_BOT_ID
 
 from .maisaka_cli_sender import CLI_PLATFORM_NAME
 from .console import console
@@ -66,7 +67,9 @@ class BufferCLI:
             message_id=f"maisaka_cli_{int(timestamp.timestamp() * 1000)}",
             timestamp=timestamp,
             platform=BufferCLI._CLI_PLATFORM,
+            received_at=timestamp,
         )
+        message.account_id = MAISAKA_CLI_BOT_ID
         message.message_info = MessageInfo(
             user_info=UserInfo(
                 user_id=BufferCLI._CLI_USER_ID,
@@ -91,6 +94,7 @@ class BufferCLI:
         self._session = await chat_manager.get_or_create_session(
             platform=self._CLI_PLATFORM,
             user_id=self._CLI_USER_ID,
+            account_id=message.account_id,
         )
         await self._message_receiver.process_message(message)
 

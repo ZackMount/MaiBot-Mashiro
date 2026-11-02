@@ -1,7 +1,9 @@
+import { TimeRangeTrack, TimeRangeTicks } from '@/components/ui/time-range-track'
+import { DAY_MINUTES, formatTimelineMinute, formatTalkTimeRange, getTimelineSegments, parseTalkTimeRange } from '@/lib/time-range'
 /**
  * 麦麦聊天页的聊天流设置弹窗。
  *
- * 弹窗内展示 Session 基本信息、适配器规则、发言频率规则、聊天 Prompt 与学习配置，
+ * 弹窗内展示 Session 基本信息、适配器规则、群聊频率或私聊暂停开关、聊天 Prompt 与学习配置，
  * 并提供删除聊天流的严肃确认入口。
  */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -15,8 +17,8 @@ import {
   Trash2,
   Undo2,
 } from 'lucide-react'
-import type { CSSProperties, PointerEvent, ReactNode } from 'react'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import type { CSSProperties, ReactNode } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -35,6 +37,7 @@ import { Label } from '@/components/ui/label'
 import { Progress } from '@/components/ui/progress'
 import { Slider } from '@/components/ui/slider'
 import { Skeleton } from '@/components/ui/skeleton'
+import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
 import { useToast } from '@/hooks/use-toast'
 import { formatChatDisplayName, getChatTypeText } from '@/lib/chat-display'
@@ -47,6 +50,7 @@ import {
   getChatStreamDetail,
   updateChatStreamAdapterPolicy,
   updateChatStreamLearning,
+  updateChatStreamPrivateReplyPause,
   updateChatStreamTalkFrequency,
   upsertChatStreamPrompt,
   type ChatAdapterStatus,
@@ -59,7 +63,7 @@ import {
 } from '@/lib/chat-management-api'
 import { cn } from '@/lib/utils'
 
-type LearningKind = 'expression' | 'jargon' | 'behavior'
+type LearningKind = 'expression' | 'jargon'
 
 function formatRuleTarget(rule: ChatConfigRule | null): string {
   if (!rule) {
@@ -154,94 +158,11 @@ function ConfigStatusRow({
 }
 
 type TalkFrequencyEditMode = 'input' | 'timeline'
-type TimelineEdge = 'end' | 'start'
-
-interface TimelineRange {
-  end: number
-  start: number
-}
-
-const DAY_MINUTES = 24 * 60
-const TIMELINE_TICKS = [0, 3, 6, 9, 12, 15, 18, 21, 24]
-const TIMELINE_DRAG_STEP_MINUTES = 5
-
 function clampTalkFrequencyValue(value: number): number {
   if (!Number.isFinite(value)) {
     return 0
   }
   return Math.max(0, Math.min(1, value))
-}
-
-function parseTimelineMinute(value: string): number | null {
-  const match = /^(\d{1,2}):(\d{1,2})$/.exec(value.trim())
-  if (!match) {
-    return null
-  }
-  const hour = Number(match[1])
-  const minute = Number(match[2])
-  if (!Number.isInteger(hour) || !Number.isInteger(minute)) {
-    return null
-  }
-  if (hour < 0 || hour > 23 || minute < 0 || minute > 59) {
-    return null
-  }
-  return hour * 60 + minute
-}
-
-function formatTimelineMinute(minute: number): string {
-  const normalizedMinute = Math.max(0, Math.min(DAY_MINUTES - 1, Math.round(minute)))
-  const hour = Math.floor(normalizedMinute / 60)
-  const minuteInHour = normalizedMinute % 60
-  return `${hour.toString().padStart(2, '0')}:${minuteInHour.toString().padStart(2, '0')}`
-}
-
-function parseTalkTimeRange(time: string): TimelineRange | null {
-  const normalizedTime = time.trim()
-  if (!normalizedTime || normalizedTime === '*') {
-    return { start: 0, end: DAY_MINUTES - 1 }
-  }
-  const [startRaw, endRaw, extra] = normalizedTime.split('-')
-  if (extra !== undefined) {
-    return null
-  }
-  const start = startRaw ? parseTimelineMinute(startRaw) : null
-  const end = endRaw ? parseTimelineMinute(endRaw) : null
-  if (start === null || end === null) {
-    return null
-  }
-  return { start, end }
-}
-
-function formatTalkTimeRange(range: TimelineRange): string {
-  return `${formatTimelineMinute(range.start)}-${formatTimelineMinute(range.end)}`
-}
-
-function getTimelineSegments(range: TimelineRange): Array<{ left: number; width: number }> {
-  if (range.start <= range.end) {
-    return [
-      {
-        left: (range.start / DAY_MINUTES) * 100,
-        width: ((range.end - range.start + 1) / DAY_MINUTES) * 100,
-      },
-    ]
-  }
-  return [
-    {
-      left: (range.start / DAY_MINUTES) * 100,
-      width: ((DAY_MINUTES - range.start) / DAY_MINUTES) * 100,
-    },
-    {
-      left: 0,
-      width: ((range.end + 1) / DAY_MINUTES) * 100,
-    },
-  ]
-}
-
-function getTimelineMinuteFromClient(clientX: number, timelineElement: HTMLElement): number {
-  const rect = timelineElement.getBoundingClientRect()
-  const ratio = rect.width > 0 ? (clientX - rect.left) / rect.width : 0
-  const rawMinute = Math.max(0, Math.min(DAY_MINUTES - 1, ratio * DAY_MINUTES))
-  return Math.round(rawMinute / TIMELINE_DRAG_STEP_MINUTES) * TIMELINE_DRAG_STEP_MINUTES
 }
 
 function talkValueColor(value: number): string {
@@ -438,8 +359,7 @@ function TalkFrequencyTimelineRule({
   const { toast } = useToast()
   const [time, setTime] = useState(rule.time || '00:00-23:59')
   const [value, setValue] = useState(() => clampTalkFrequencyValue(rule.value))
-  const draggingEdgeRef = useRef<TimelineEdge | null>(null)
-  const range = parseTalkTimeRange(time)
+  const range = !time.trim() || time.trim() === '*' ? { start: 0, end: DAY_MINUTES - 1 } : parseTalkTimeRange(time)
   const draggableRange = range && time.trim() !== '' && time.trim() !== '*'
   const segments = range ? getTimelineSegments(range) : []
   const startLabelLeft = range ? (range.start / DAY_MINUTES) * 100 : 0
@@ -502,103 +422,13 @@ function TalkFrequencyTimelineRule({
     },
   })
 
-  const updateTimeFromPointer = (event: PointerEvent<HTMLElement>, edge: TimelineEdge) => {
-    if (!range) {
-      return
-    }
-    const timelineElement = event.currentTarget.closest('[data-chat-talk-timeline-track]')
-    if (!(timelineElement instanceof HTMLElement)) {
-      return
-    }
-    const nextMinute = getTimelineMinuteFromClient(event.clientX, timelineElement)
-    const nextRange =
-      edge === 'start' ? { ...range, start: nextMinute } : { ...range, end: nextMinute }
-    setTime(formatTalkTimeRange(nextRange))
-  }
-
-  const startDrag = (event: PointerEvent<HTMLElement>, edge: TimelineEdge) => {
-    event.preventDefault()
-    draggingEdgeRef.current = edge
-    event.currentTarget.setPointerCapture(event.pointerId)
-    updateTimeFromPointer(event, edge)
-  }
-
   return (
     <div className="bg-muted/25 grid min-w-0 gap-3 rounded-md border p-3 xl:grid-cols-[minmax(12rem,1fr)_8rem_8rem] xl:items-center">
       <div className="min-w-0">
-        <div className="text-muted-foreground relative mb-1 h-4 px-1 text-[10px]">
-          {TIMELINE_TICKS.map((hour) => (
-            <span
-              key={hour}
-              className="absolute -translate-x-1/2"
-              style={{ left: `${(hour / 24) * 100}%` }}
-            >
-              {hour.toString().padStart(2, '0')}
-            </span>
-          ))}
-        </div>
-        <div className="bg-background relative h-8 rounded-md border" data-chat-talk-timeline-track>
-          {TIMELINE_TICKS.slice(1, -1).map((hour) => (
-            <span
-              key={hour}
-              className="border-muted-foreground/20 absolute top-0 h-full border-l border-dashed"
-              style={{ left: `${(hour / 24) * 100}%` }}
-            />
-          ))}
-          {segments.map((segment, index) => (
-            <span
-              key={index}
-              className={cn(
-                'absolute top-1/2 h-4 -translate-y-1/2 rounded-sm opacity-85',
-                talkValueColor(value),
-                !range && 'opacity-35'
-              )}
-              style={{ left: `${segment.left}%`, width: `${segment.width}%` }}
-            />
-          ))}
-          {draggableRange && (
-            <>
-              <button
-                type="button"
-                className="border-background bg-foreground/80 absolute top-1/2 h-7 w-2 -translate-x-1/2 -translate-y-1/2 cursor-ew-resize rounded-sm border"
-                style={{ left: `${(range.start / DAY_MINUTES) * 100}%` }}
-                aria-label="调整开始时间"
-                onPointerDown={(event) => startDrag(event, 'start')}
-                onPointerMove={(event) => {
-                  if (
-                    draggingEdgeRef.current === 'start' &&
-                    event.currentTarget.hasPointerCapture(event.pointerId)
-                  ) {
-                    updateTimeFromPointer(event, 'start')
-                  }
-                }}
-                onPointerUp={(event) => {
-                  draggingEdgeRef.current = null
-                  event.currentTarget.releasePointerCapture(event.pointerId)
-                }}
-              />
-              <button
-                type="button"
-                className="border-background bg-foreground/80 absolute top-1/2 h-7 w-2 -translate-x-1/2 -translate-y-1/2 cursor-ew-resize rounded-sm border"
-                style={{ left: `${((range.end + 1) / DAY_MINUTES) * 100}%` }}
-                aria-label="调整结束时间"
-                onPointerDown={(event) => startDrag(event, 'end')}
-                onPointerMove={(event) => {
-                  if (
-                    draggingEdgeRef.current === 'end' &&
-                    event.currentTarget.hasPointerCapture(event.pointerId)
-                  ) {
-                    updateTimeFromPointer(event, 'end')
-                  }
-                }}
-                onPointerUp={(event) => {
-                  draggingEdgeRef.current = null
-                  event.currentTarget.releasePointerCapture(event.pointerId)
-                }}
-              />
-            </>
-          )}
-        </div>
+        <TimeRangeTicks />
+        <TimeRangeTrack range={range} segments={segments} disabled={!draggableRange}
+          colorClassName={cn(talkValueColor(value), range ? 'opacity-85' : 'opacity-35')}
+          onChange={(next) => setTime(formatTalkTimeRange(next))} />
         <div className="text-muted-foreground relative mt-1 h-4 text-[11px]">
           {range ? (
             <>
@@ -627,8 +457,8 @@ function TalkFrequencyTimelineRule({
           max={1}
           step={0.01}
           onValueChange={(values) => setValue(clampTalkFrequencyValue(values[0] ?? 0))}
-          data-dashboard-slider="config"
-          data-dashboard-slider-value-format="fixed-2"
+          variant="value"
+          valueFormat="fixed-2"
         />
         <span className="w-12 text-right font-mono text-xs tabular-nums">{value.toFixed(2)}</span>
       </div>
@@ -783,6 +613,55 @@ function TalkFrequencyEditor({ detail }: { detail: ChatStreamDetail }) {
         </div>
       )}
     </div>
+  )
+}
+
+function PrivateReplyPauseSection({ detail }: { detail: ChatStreamDetail }) {
+  const queryClient = useQueryClient()
+  const { toast } = useToast()
+  const settings = detail.private_reply
+  const mutation = useMutation({
+    mutationFn: (paused: boolean | null) => updateChatStreamPrivateReplyPause(detail.session_id, paused),
+    onSuccess: (nextDetail) => {
+      queryClient.setQueryData(['chat-stream-detail', detail.session_id], nextDetail)
+      toast({ title: '私聊暂停设置已保存' })
+    },
+    onError: (error) => {
+      toast({
+        title: '私聊暂停设置保存失败',
+        description: error instanceof Error ? error.message : '请稍后重试',
+        variant: 'destructive',
+      })
+    },
+  })
+  if (!settings) return null
+
+  return (
+    <section className="space-y-3 rounded-md border p-3">
+      <div className="flex items-center justify-between gap-3">
+        <Label htmlFor="private-reply-paused" className="font-medium">暂停回复</Label>
+        <Switch
+          id="private-reply-paused"
+          checked={settings.paused}
+          disabled={mutation.isPending}
+          onCheckedChange={(paused) => mutation.mutate(paused)}
+        />
+      </div>
+      <p className="text-muted-foreground text-sm">
+        暂停后仍会接收消息并保留聊天历史，麦麦暂时不再思考和回复这个私聊。
+      </p>
+      <div className="flex items-center justify-between gap-3 text-sm">
+        <span className="text-muted-foreground">
+          {settings.has_override ? '已为当前私聊单独设置' : '跟随全局私聊设置'}
+          {`（全局${settings.global_paused ? '已暂停' : '正常回复'}）`}
+        </span>
+        {settings.has_override && (
+          <Button size="sm" variant="outline" disabled={mutation.isPending} onClick={() => mutation.mutate(null)}>
+            恢复跟随全局
+          </Button>
+        )}
+      </div>
+    </section>
   )
 }
 
@@ -1019,11 +898,6 @@ function ConfigStatusRows({ detail }: { detail: ChatStreamDetail }) {
   const configRows = [
     { kind: 'expression' as const, title: '表达', status: detail.expression },
     { kind: 'jargon' as const, title: '黑话', status: detail.jargon },
-    {
-      kind: 'behavior' as const,
-      title: '行为',
-      status: detail.behavior,
-    },
   ]
 
   return (
@@ -1284,7 +1158,7 @@ function ChatDetailContent({
       </section>
 
       <ChatAdapterSection detail={detail} />
-      <TalkFrequencySection detail={detail} />
+      {detail.chat_type === 'private' ? <PrivateReplyPauseSection detail={detail} /> : <TalkFrequencySection detail={detail} />}
       <ChatPromptSection detail={detail} />
       <ConfigStatusRows detail={detail} />
     </div>
@@ -1407,7 +1281,7 @@ function DeleteChatStreamDialog({
               <div className="text-destructive font-medium">将被清理的数据包括：</div>
               <ul className="text-muted-foreground mt-2 list-disc space-y-1 pl-5">
                 <li>聊天流记录和该 session_id 下的所有消息。</li>
-                <li>表达学习、黑话关联、工具调用记录、行为学习记录。</li>
+                <li>表达学习、黑话关联、工具调用记录。</li>
                 <li>消息统计、高频词等以该聊天流为归属的数据。</li>
               </ul>
             </div>

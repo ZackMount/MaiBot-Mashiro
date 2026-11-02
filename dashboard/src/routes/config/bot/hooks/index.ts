@@ -6,14 +6,12 @@ export { useAutoSave } from './useAutoSave'
 export {
   AliasNamesHook,
   AMemorixSharedMemoryGroupsHook,
-  BehaviorGroupsHook,
-  BehaviorFocusGroupsHook,
-  BehaviorLearningListHook,
   BotPlatformAccountsHook,
   ChatPromptsHook,
   ChatTalkValueRulesHook,
   ExpressionGroupsHook,
   ExpressionLearningListHook,
+  FocusGroupsHook,
   FocusWhitelistHook,
   JargonGroupsHook,
   JargonLearningListHook,
@@ -22,7 +20,9 @@ export {
   MCPRootItemsHook,
   MCPServersHook,
   MultipleReplyStyleHook,
+  PrivateReplyPauseRulesHook,
   RegexRulesHook,
 } from './complexFieldHooks'
 export { AMemorixRetrievalChatsHook } from './AMemorixRetrievalChatsHook'
+export { LearningBlacklistHook } from './LearningBlacklistHook'
 export { AMemorixRetrievalFilterGroupHook } from './AMemorixRetrievalFilterGroupHook'

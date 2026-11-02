@@ -7,6 +7,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { AlertCircle, CheckCircle2, Download, Loader2 } from 'lucide-react'
 
+import { PluginSettingsDialog } from './PluginSettingsDialog'
 import type { PluginInfo, PluginLoadProgress } from './types'
 import { getPluginProgressDetail } from './types'
 
@@ -15,14 +16,24 @@ interface InstallDialogProps {
   plugin: PluginInfo | null
   loadProgress: PluginLoadProgress | null
   onOpenChange: (open: boolean) => void
-  onInstall: (branch: string) => void
+  onInstall: (target: string) => void
 }
 
 export function InstallDialog({ open, plugin, loadProgress, onOpenChange, onInstall }: InstallDialogProps) {
+  const [sourceSettingsOpen, setSourceSettingsOpen] = useState(false)
   const [selectedBranch, setSelectedBranch] = useState('main')
   const [customBranch, setCustomBranch] = useState('')
   const [branchInputMode, setBranchInputMode] = useState<'preset' | 'custom'>('preset')
   const [showAdvancedOptions, setShowAdvancedOptions] = useState(false)
+  const [releaseSelection, setReleaseSelection] = useState<{ pluginId: string; version: string } | null>(null)
+  const releaseCatalog = plugin?.releases
+  const isReleaseInstall = releaseCatalog?.mode === 'releases'
+  // 每个插件默认使用推荐版本，切换插件时不沿用其他插件的版本选择。
+  const selectedVersion = releaseSelection?.pluginId === plugin?.id
+    ? releaseSelection?.version ?? ''
+    : releaseCatalog?.recommended_version ?? ''
+  const selectedRelease = releaseCatalog?.versions.find((release) => release.version === selectedVersion)
+  const canInstallRelease = !releaseCatalog?.sync_error && !!selectedRelease?.compatible && !selectedRelease.yanked
   const installProgress = loadProgress?.operation === 'install' && loadProgress.plugin_id === plugin?.id
     ? loadProgress
     : null
@@ -44,7 +55,10 @@ export function InstallDialog({ open, plugin, loadProgress, onOpenChange, onInst
     if (open) {
       return
     }
-    const timer = window.setTimeout(() => setLastInstallProgress(null), 0)
+    const timer = window.setTimeout(() => {
+      setLastInstallProgress(null)
+      setSourceSettingsOpen(false)
+    }, 0)
     return () => window.clearTimeout(timer)
   }, [open])
 
@@ -54,6 +68,10 @@ export function InstallDialog({ open, plugin, loadProgress, onOpenChange, onInst
   }, [plugin?.id])
 
   const handleInstall = () => {
+    if (isReleaseInstall) {
+      if (canInstallRelease) onInstall(selectedVersion)
+      return
+    }
     const branch = branchInputMode === 'custom' ? customBranch : selectedBranch
     
     if (!branch || branch.trim() === '') {
@@ -70,7 +88,12 @@ export function InstallDialog({ open, plugin, loadProgress, onOpenChange, onInst
       }
       onOpenChange(nextOpen)
     }}>
-      <DialogContent preventOutsideClose={isInstalling} hideCloseButton={isInstalling}>
+      <DialogContent
+        preventOutsideClose={isInstalling}
+        hideCloseButton={isInstalling}
+        className="data-[state=open]:animate-none data-[state=closed]:animate-none"
+        overlayClassName="data-[state=open]:animate-none data-[state=closed]:animate-none"
+      >
         <DialogHeader>
           <DialogTitle>安装插件</DialogTitle>
           <DialogDescription>
@@ -82,7 +105,7 @@ export function InstallDialog({ open, plugin, loadProgress, onOpenChange, onInst
           {/* 基本信息 */}
           <div>
             <p className="text-sm text-muted-foreground">
-              版本: {plugin?.manifest.version}
+              版本: {isReleaseInstall ? selectedRelease?.version || '未选择' : plugin?.manifest.version}
             </p>
             <p className="text-sm text-muted-foreground">
               作者: {typeof plugin?.manifest.author === 'string' 
@@ -91,77 +114,106 @@ export function InstallDialog({ open, plugin, loadProgress, onOpenChange, onInst
             </p>
           </div>
 
-          {/* 高级选项开关 */}
-          <div className="flex items-center space-x-2">
-            <Checkbox
-              id="advanced-options"
-              checked={showAdvancedOptions}
-              onCheckedChange={(checked) => setShowAdvancedOptions(checked as boolean)}
-            />
-            <label
-              htmlFor="advanced-options"
-              className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
-            >
-              高级选项
-            </label>
-          </div>
-
-          {/* 高级选项内容 */}
-          {showAdvancedOptions && (
-            <div className="space-y-4 p-4 border rounded-lg">
-              <div className="space-y-2">
-                {/* eslint-disable-next-line jsx-a11y/label-has-associated-control -- section heading above Tabs, not a form label */}
-                <label className="text-sm font-medium">分支选择</label>
-                
-                <Tabs value={branchInputMode} onValueChange={(value) => setBranchInputMode(value as 'preset' | 'custom')}>
-                  <TabsList className="grid w-full grid-cols-2">
-                    <TabsTrigger value="preset" className="text-xs">预设分支</TabsTrigger>
-                    <TabsTrigger value="custom" className="text-xs">自定义分支</TabsTrigger>
-                  </TabsList>
-                  
-                  {/* 预设分支选择 */}
-                  {branchInputMode === 'preset' && (
-                    <div className="mt-3">
-                      <Select value={selectedBranch} onValueChange={setSelectedBranch}>
-                        <SelectTrigger>
-                          <SelectValue placeholder="选择分支" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="main">main (默认)</SelectItem>
-                          <SelectItem value="master">master</SelectItem>
-                          <SelectItem value="dev">dev (开发版)</SelectItem>
-                          <SelectItem value="develop">develop</SelectItem>
-                          <SelectItem value="beta">beta (测试版)</SelectItem>
-                          <SelectItem value="stable">stable (稳定版)</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </div>
-                  )}
-
-                  {/* 自定义分支输入 */}
-                  {branchInputMode === 'custom' && (
-                    <div className="space-y-2 mt-3">
-                      <input
-                        type="text"
-                        className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
-                        placeholder="输入分支名称，例如: feature/new-feature"
-                        value={customBranch}
-                        onChange={(e) => setCustomBranch(e.target.value)}
-                      />
-                      <p className="text-xs text-muted-foreground">
-                        输入 Git 分支名称、标签或提交哈希
-                      </p>
-                    </div>
-                  )}
-                </Tabs>
-              </div>
+          {isReleaseInstall ? (
+            <div className="space-y-2">
+              <label htmlFor="plugin-install-version" className="text-sm font-medium">安装版本</label>
+              <select
+                id="plugin-install-version"
+                data-dashboard-select-trigger="true"
+                className="bg-background flex h-9 w-full rounded-md border border-input px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50"
+                value={selectedVersion}
+                disabled={isInstalling}
+                onChange={(event) => {
+                  if (plugin) setReleaseSelection({ pluginId: plugin.id, version: event.target.value })
+                }}
+              >
+                {!selectedVersion && <option value="" disabled>选择兼容版本</option>}
+                {releaseCatalog.versions.map((release) => (
+                  <option key={release.version} value={release.version} disabled={release.yanked || !release.compatible}>
+                    v{release.version}
+                    {release.version === releaseCatalog.recommended_version ? '（推荐）' : ''}
+                    {release.prerelease ? '（预发布）' : ''}
+                    {release.yanked ? '（已撤回）' : !release.compatible ? '（不兼容）' : ''}
+                  </option>
+                ))}
+              </select>
+              {!canInstallRelease && <p className="text-sm text-destructive">请选择可用的兼容版本</p>}
             </div>
-          )}
+          ) : (
+            <>
+              {/* 高级选项开关 */}
+              <div className="flex items-center space-x-2">
+                <Checkbox
+                  id="advanced-options"
+                  checked={showAdvancedOptions}
+                  onCheckedChange={(checked) => setShowAdvancedOptions(checked as boolean)}
+                />
+                <label
+                  htmlFor="advanced-options"
+                  className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
+                >
+                  高级选项
+                </label>
+              </div>
 
-          {!showAdvancedOptions && (
-            <p className="text-sm text-muted-foreground">
-              将从默认分支 (main) 安装插件
-            </p>
+              {/* 高级选项内容 */}
+              {showAdvancedOptions && (
+                <div className="space-y-4 p-4 border rounded-lg">
+                  <div className="space-y-2">
+                    {/* eslint-disable-next-line jsx-a11y/label-has-associated-control -- section heading above Tabs, not a form label */}
+                    <label className="text-sm font-medium">分支选择</label>
+
+                    <Tabs value={branchInputMode} onValueChange={(value) => setBranchInputMode(value as 'preset' | 'custom')}>
+                      <TabsList className="grid w-full grid-cols-2">
+                        <TabsTrigger value="preset" className="text-xs">预设分支</TabsTrigger>
+                        <TabsTrigger value="custom" className="text-xs">自定义分支</TabsTrigger>
+                      </TabsList>
+
+                      {/* 预设分支选择 */}
+                      {branchInputMode === 'preset' && (
+                        <div className="mt-3">
+                          <Select value={selectedBranch} onValueChange={setSelectedBranch}>
+                            <SelectTrigger>
+                              <SelectValue placeholder="选择分支" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="main">main (默认)</SelectItem>
+                              <SelectItem value="master">master</SelectItem>
+                              <SelectItem value="dev">dev (开发版)</SelectItem>
+                              <SelectItem value="develop">develop</SelectItem>
+                              <SelectItem value="beta">beta (测试版)</SelectItem>
+                              <SelectItem value="stable">stable (稳定版)</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
+                      )}
+
+                      {/* 自定义分支输入 */}
+                      {branchInputMode === 'custom' && (
+                        <div className="space-y-2 mt-3">
+                          <input
+                            type="text"
+                            className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                            placeholder="输入分支名称，例如: feature/new-feature"
+                            value={customBranch}
+                            onChange={(e) => setCustomBranch(e.target.value)}
+                          />
+                          <p className="text-xs text-muted-foreground">
+                            输入 Git 分支名称、标签或提交哈希
+                          </p>
+                        </div>
+                      )}
+                    </Tabs>
+                  </div>
+                </div>
+              )}
+
+              {!showAdvancedOptions && (
+                <p className="text-sm text-muted-foreground">
+                  将从默认分支 (main) 安装插件
+                </p>
+              )}
+            </>
           )}
 
           {displayedProgress && (
@@ -239,17 +291,28 @@ export function InstallDialog({ open, plugin, loadProgress, onOpenChange, onInst
           >
             {installFinished ? '关闭' : '取消'}
           </Button>
-          {!installFinished && (
-            <Button onClick={handleInstall} disabled={isInstalling}>
+          {displayedProgress?.stage === 'error' && (
+            <Button variant="outline" onClick={() => setSourceSettingsOpen(true)}>
+              打开下载源设置
+            </Button>
+          )}
+          {displayedProgress?.stage !== 'success' && (
+            <Button onClick={handleInstall} disabled={isInstalling || (isReleaseInstall && !canInstallRelease)}>
               {isInstalling ? (
                 <Loader2 className="h-4 w-4 mr-2 animate-spin" />
               ) : (
                 <Download className="h-4 w-4 mr-2" />
               )}
-              {isInstalling ? '安装中' : '安装'}
+              {isInstalling ? '安装中' : displayedProgress?.stage === 'error' ? '重试' : '安装'}
             </Button>
           )}
         </DialogFooter>
+        {sourceSettingsOpen && (
+          <PluginSettingsDialog
+            onClose={() => setSourceSettingsOpen(false)}
+            onSaved={() => setSourceSettingsOpen(false)}
+          />
+        )}
       </DialogContent>
     </Dialog>
   )

@@ -1,17 +1,14 @@
 import { Link } from '@tanstack/react-router'
 import {
   BookOpen,
-  Check,
   ChevronLeft,
   ChevronsUp,
   Database,
   FileText,
-  Globe,
-  LogOut,
-  Menu,
   Moon,
   MoreHorizontal,
   Search,
+  Settings,
   SlidersHorizontal,
   Sun,
 } from 'lucide-react'
@@ -22,6 +19,7 @@ import {
   type ComponentType,
   useContext,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
 } from 'react'
@@ -30,34 +28,27 @@ import { useTranslation } from 'react-i18next'
 import { BackgroundLayer } from '@/components/background-layer'
 import { BackendManager } from '@/components/electron/BackendManager'
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuSub,
-  DropdownMenuSubContent,
-  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { toggleThemeWithTransition } from '@/components/use-theme'
 import { useBackground } from '@/hooks/use-background'
-import { logout } from '@/lib/auth'
 import { isElectron } from '@/lib/runtime'
 import { ThemeProviderContext } from '@/lib/theme-context'
 import { cn } from '@/lib/utils'
 import { extensionIcons, extensionPath, extensionWorkspace } from '@/lib/plugin-webui'
 import type { WebUIExtension } from '@/lib/plugin-webui'
+import { splitWorkspaceTabs } from '@/lib/workspace-tabs'
 
+import { HeaderUpdateButton } from './HeaderUpdateButton'
+import { TopbarMascot } from './TopbarMascot'
 import type { WorkspaceMode } from './types'
 
-const LANGUAGE_CODES = ['zh', 'en', 'ja', 'ko'] as const
-const LANGUAGE_NAMES: Record<(typeof LANGUAGE_CODES)[number], string> = {
-  zh: '中文',
-  en: 'English',
-  ja: '日本語',
-  ko: '한국어',
-}
 const LOG_WORKSPACE_COMPACT_GAP = 12
 const LOG_WORKSPACE_EXPAND_GAP = 96
 const WORKSPACE_HOVER_LEAVE_DELAY_MS = 600
@@ -81,12 +72,14 @@ const WORKSPACE_TABS: Array<{
 
 interface HeaderProps {
   extensions?: WebUIExtension[]
+  /** 工作区切换动画期间隐藏日志视图切换，让它随页面一起淡入淡出 */
+  logSwitcherHidden?: boolean
+  /** 侧栏滑入/滑出期间让顶栏延伸到侧栏下方，顶栏自身保持不动 */
+  sidebarUnderlay?: boolean
   sidebarOpen: boolean
-  mobileMenuOpen: boolean
   searchOpen: boolean
   actualTheme: 'light' | 'dark'
   onSidebarToggle: () => void
-  onMobileMenuToggle: () => void
   onSearchOpenChange: (open: boolean) => void
   onThemeChange: (theme: 'light' | 'dark' | 'system') => void
   onTopbarToggle: () => void
@@ -95,16 +88,22 @@ interface HeaderProps {
   workspaceMode: WorkspaceMode
 }
 
-type HeaderActionId = 'search' | 'docs' | 'language' | 'theme' | 'logout'
+type HeaderActionId =
+  | 'update'
+  | 'settings'
+  | 'docs'
+  | 'theme'
+  | 'collapse'
+  | 'extensions'
 
 export function Header({
   extensions = [],
+  logSwitcherHidden = false,
+  sidebarUnderlay = false,
   sidebarOpen,
-  mobileMenuOpen,
   searchOpen,
   actualTheme,
   onSidebarToggle,
-  onMobileMenuToggle,
   onSearchOpenChange,
   onThemeChange,
   onTopbarToggle,
@@ -112,7 +111,15 @@ export function Header({
   topbarCollapsed,
   workspaceMode,
 }: HeaderProps) {
-  const { t, i18n: i18nInstance } = useTranslation()
+  const { t } = useTranslation()
+  const [preloadMobileSearch, setPreloadMobileSearch] = useState(false)
+
+  useEffect(() => {
+    if (!window.matchMedia('(max-width: 1023.98px)').matches) return
+    // 首屏显示后提前挂载关闭状态的搜索面板，首次点击不再等待下载组件。
+    const timer = window.setTimeout(() => setPreloadMobileSearch(true), 300)
+    return () => window.clearTimeout(timer)
+  }, [])
   const pluginTabs = extensions.flatMap((extension) => {
     const page = extension.pages.find((page) => page.placement === 'workspace')
     return page
@@ -127,27 +134,39 @@ export function Header({
         ]
       : []
   })
-  // 顶栏最多直接展示一个插件工作区，其余收进“更多”；当前工作区保持可见。
-  const visiblePluginTab = pluginTabs.find((tab) => tab.value === workspaceMode) ?? pluginTabs[0]
+  // 顶栏最多直接展示两个插件工作区，其余收进“更多”；当前工作区保持可见。
+  const activePluginTab = pluginTabs.find((tab) => tab.value === workspaceMode)
+  const { visible: visiblePluginTabs, overflow: overflowTabs } = splitWorkspaceTabs(pluginTabs, activePluginTab)
   const workspaceTabs = [
     ...WORKSPACE_TABS.map((tab) => ({ ...tab, literal: false })),
-    ...(visiblePluginTab ? [visiblePluginTab] : []),
+    ...visiblePluginTabs,
   ]
-  const overflowTabs = pluginTabs.filter((tab) => tab !== visiblePluginTab)
   const workspaceTabsKey = workspaceTabs.map((tab) => `${tab.value}:${tab.labelKey}`).join('|')
   const { themeConfig } = useContext(ThemeProviderContext)
   // 千禧风格的顶栏要放得下键帽，比其它风格高一截；高度由动画驱动，所以在这里按风格取值。
-  const expandedTopbarHeight = themeConfig.dashboardStyle === 'millennium' ? 70 : 42
-  const currentLang = i18nInstance.language || 'zh'
+  const expandedTopbarHeight = themeConfig.dashboardStyle === 'millennium' ? 52 : 42
+  // 原版风格和千禧一样用顶栏里的按钮收起顶栏，不再显示顶栏下沿的滑条。
+  const isModernStyle = themeConfig.dashboardStyle === 'modern'
   const { config: headerBg, inheritedFrom } = useBackground('header')
   const inheritsPageBackground = inheritedFrom === 'page'
+  const [searchQuery, setSearchQuery] = useState('')
+  const [aiSearchRequestId, setAISearchRequestId] = useState(0)
   const [backendManagerOpen, setBackendManagerOpen] = useState(false)
   const [activeBackendName, setActiveBackendName] = useState<string>('')
   const [workspaceTabsCompact, setWorkspaceTabsCompact] = useState(false)
   const [hoveredWorkspace, setHoveredWorkspace] = useState<WorkspaceMode | null>(null)
   const [workspaceHoverLocked, setWorkspaceHoverLocked] = useState(false)
   const [hoveredHeaderAction, setHoveredHeaderAction] = useState<HeaderActionId | null>(null)
-  const [languageMenuOpen, setLanguageMenuOpen] = useState(false)
+  const logSwitcherShown = workspaceMode === 'logs' && !logSwitcherHidden
+  const [logSwitcherSettled, setLogSwitcherSettled] = useState(logSwitcherShown)
+  // 桌面端侧栏当前占据的布局宽度（px）；小屏侧栏不占布局，探针不显示，取 0。
+  const [sidebarInset, setSidebarInset] = useState(0)
+  const sidebarInsetProbeRef = useRef<HTMLSpanElement | null>(null)
+  const [topbarRowGap, setTopbarRowGap] = useState(0)
+  // 只有千禧顶栏的日志槽位参与正常布局，其它风格是绝对定位，不需要让位。
+  // 槽位自身会多带一段行间距，让位宽度里要扣掉，工作区键才正好停在原位。
+  const logSwitcherInset =
+    themeConfig.dashboardStyle === 'millennium' ? Math.max(0, sidebarInset - topbarRowGap) : 0
   const workspaceTabsCompactRef = useRef(false)
   const workspaceHoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const headerActionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -164,6 +183,20 @@ export function Header({
   useEffect(() => {
     workspaceTabsCompactRef.current = workspaceTabsCompact
   }, [workspaceTabsCompact])
+
+  // 首帧就要量到侧栏宽度：侧栏顶部此时已让出底色，顶栏晚一帧垫过去会闪一下页面底色。
+  useLayoutEffect(() => {
+    const probe = sidebarInsetProbeRef.current
+    if (!probe) return
+    setSidebarInset(probe.offsetWidth)
+    const resizeObserver = new ResizeObserver(() => {
+      setSidebarInset(probe.offsetWidth)
+      const row = document.getElementById('log-viewer-topbar-tabs')?.parentElement
+      setTopbarRowGap(row ? parseFloat(window.getComputedStyle(row).columnGap) || 0 : 0)
+    })
+    resizeObserver.observe(probe)
+    return () => resizeObserver.disconnect()
+  }, [])
 
   useEffect(
     () => () => {
@@ -184,7 +217,7 @@ export function Header({
 
 
   useEffect(() => {
-    if (workspaceMode !== 'logs') {
+    if (workspaceMode !== 'logs' || themeConfig.dashboardStyle === 'millennium') {
       const resetFrameId = requestAnimationFrame(() => setWorkspaceTabsCompact(false))
       return () => cancelAnimationFrame(resetFrameId)
     }
@@ -245,19 +278,9 @@ export function Header({
       window.removeEventListener('resize', updateCompactState)
       resizeObserver.disconnect()
     }
-  }, [workspaceMode, workspaceTabsKey])
+  }, [workspaceMode, workspaceTabsKey, themeConfig.dashboardStyle])
 
-  const handleLogout = async () => {
-    await logout()
-  }
-
-  const activeHeaderAction: HeaderActionId | null = languageMenuOpen
-    ? 'language'
-    : searchOpen
-      ? 'search'
-      : null
-  const highlightedHeaderAction =
-    hoveredWorkspace === null ? (hoveredHeaderAction ?? activeHeaderAction) : null
+  const highlightedHeaderAction = hoveredWorkspace === null ? hoveredHeaderAction : null
 
   const handleHeaderActionEnter = (action: HeaderActionId) => {
     if (headerActionTimerRef.current !== null) {
@@ -282,6 +305,7 @@ export function Header({
     highlightedHeaderAction === action ? (
       <motion.span
         layoutId="topbar-selection-pill"
+        data-dashboard-topbar-pill="true"
         className="bg-primary pointer-events-none absolute inset-x-1 inset-y-0 -z-10 rounded-sm shadow-sm"
         transition={{ type: 'spring', stiffness: 480, damping: 38, mass: 0.6 }}
       />
@@ -294,12 +318,30 @@ export function Header({
       initial={false}
       animate={{ height: topbarCollapsed ? 16 : expandedTopbarHeight, marginBottom: 0 }}
       transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
+      style={
+        sidebarUnderlay && sidebarInset > 0 && !topbarCollapsed
+          ? // 向左延伸到侧栏下方并用等量内边距抵消，内容位置不变；侧栏滑走后露出的仍是顶栏。
+            { marginLeft: -sidebarInset, paddingLeft: `calc(1rem + ${sidebarInset}px)` }
+          : undefined
+      }
       className={cn(
         'sticky top-0 isolate z-30 min-w-0 overflow-visible',
         topbarCollapsed ? 'h-4' : 'flex h-[42px] flex-col border-b px-3 backdrop-blur-md sm:px-4',
+        // 手机上不显示顶栏：页面自带大标题，搜索与设置分别由标签栏和首页头像承担
+        'max-lg:hidden',
         topbarCollapsed || inheritsPageBackground ? 'bg-transparent' : 'bg-background'
       )}
     >
+      <span
+        ref={sidebarInsetProbeRef}
+        aria-hidden="true"
+        className={cn(
+          'pointer-events-none invisible absolute top-0 left-0 hidden h-0 lg:block',
+          sidebarOpen
+            ? 'w-[var(--layout-sidebar-width)]'
+            : 'w-[var(--layout-sidebar-collapsed-width)]'
+        )}
+      />
       {topbarCollapsed && (
         <div
           data-dashboard-header-strip="true"
@@ -309,7 +351,7 @@ export function Header({
           )}
         >
           {!inheritsPageBackground && <BackgroundLayer config={headerBg} layerId="header" />}
-          {sidebarOpen && (
+          {sidebarOpen && !isModernStyle && (
             <button
               type="button"
               data-dashboard-sidebar-mode-switch="true"
@@ -333,12 +375,14 @@ export function Header({
           <button
             type="button"
             data-dashboard-topbar-toggle="true"
+            data-topbar-mascot-toggle="true"
             onClick={onTopbarToggle}
             aria-label={t('header.expandTopbar')}
             aria-expanded={!topbarCollapsed}
             title={t('header.expandTopbar')}
             className="bg-foreground/70 relative z-10 h-2 w-24 transition-shadow"
           >
+            <TopbarMascot />
             <span className="sr-only">{t('header.expandTopbar')}</span>
           </button>
         </div>
@@ -349,30 +393,11 @@ export function Header({
       )}
       <div className={cn(topbarCollapsed ? 'hidden' : 'contents')}>
         <div className="relative z-10 flex h-full min-h-0 items-center justify-between gap-2">
-          <div
-            id="log-viewer-topbar-tabs"
-            className={cn(
-              'absolute top-1/2 left-0 hidden min-w-0 shrink-0 -translate-y-1/2 items-center',
-              workspaceMode === 'logs' && 'sm:flex'
-            )}
-          />
-
           <div className="flex min-w-0 shrink-0 items-center gap-2 sm:gap-4">
-            {/* 移动端菜单按钮 */}
-            <button
-              onClick={onMobileMenuToggle}
-              aria-label={t('a11y.closeMenu')}
-              aria-expanded={mobileMenuOpen}
-              className={cn(
-                'hover:bg-accent rounded-lg p-2 lg:hidden',
-                workspaceMode === 'logs' && 'hidden'
-              )}
-            >
-              <Menu className="h-5 w-5" />
-            </button>
 
-            {/* 固定模式显示左折线；悬浮模式展开后由侧栏内的右折线切回固定模式。 */}
-            {sidebarOpen && (
+            {/* 固定模式显示左折线；悬浮模式展开后由侧栏内的右折线切回固定模式。
+                原版风格的这枚开关放在侧栏 Logo 行右侧，这里不再渲染。 */}
+            {sidebarOpen && !isModernStyle && (
               <button
                 type="button"
                 data-dashboard-sidebar-mode-switch="true"
@@ -438,6 +463,7 @@ export function Header({
                 >
                   {workspaceTabs.map(({ value, to, icon: Icon, labelKey, literal }) => (
                     <TabsTrigger
+                      size="sm"
                       key={value}
                       asChild
                       value={value}
@@ -497,6 +523,7 @@ export function Header({
                           (hoveredWorkspace ?? workspaceMode) === value && (
                           <motion.span
                             layoutId="topbar-selection-pill"
+                            data-dashboard-topbar-pill="true"
                             className="bg-primary absolute inset-x-1 inset-y-0.5 -z-10 rounded-sm shadow-sm"
                             transition={{ type: 'spring', stiffness: 480, damping: 38, mass: 0.6 }}
                           />
@@ -518,7 +545,21 @@ export function Header({
               {overflowTabs.length > 0 && (
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
-                    <Button variant="ghost" size="icon" aria-label={t('pluginWebUI.more')}>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      title={t('pluginWebUI.more')}
+                      aria-label={t('pluginWebUI.more')}
+                      data-dashboard-header-action="true"
+                      data-dashboard-workspace-more="true"
+                      data-header-action-highlighted={
+                        highlightedHeaderAction === 'extensions' ? 'true' : 'false'
+                      }
+                      onPointerEnter={() => handleHeaderActionEnter('extensions')}
+                      onPointerLeave={handleHeaderActionLeave}
+                      className="relative isolate shrink-0 border-0 bg-transparent shadow-none"
+                    >
+                      {renderHeaderActionPill('extensions')}
                       <MoreHorizontal className="h-4 w-4" />
                     </Button>
                   </DropdownMenuTrigger>
@@ -535,6 +576,67 @@ export function Header({
                   </DropdownMenuContent>
                 </DropdownMenu>
               )}
+              {/* 顶栏搜索：提交问题后打开搜索窗口并自动执行 AI 搜索。 */}
+              <form
+                role="search"
+                data-dashboard-header-search="true"
+                onSubmit={(event) => {
+                  event.preventDefault()
+                  if (searchQuery.trim()) {
+                    setAISearchRequestId((current) => current + 1)
+                  }
+                  onSearchOpenChange(true)
+                }}
+                className={cn(
+                  'relative ml-2 flex min-w-0 flex-1 items-center sm:ml-3 sm:max-w-72',
+                  // 原版风格在手机上由底部标签栏的搜索按钮负责搜索，顶栏不再重复放搜索框
+                  themeConfig.dashboardStyle !== 'millennium' && 'max-lg:hidden',
+                  workspaceMode === 'logs' && themeConfig.dashboardStyle !== 'millennium'
+                    ? 'mr-auto sm:mr-0 sm:w-48 sm:flex-none'
+                    : 'mr-auto'
+                )}
+              >
+                <Input
+                  type="search"
+                  value={searchQuery}
+                  onChange={(event) => setSearchQuery(event.target.value)}
+                  placeholder={t('header.searchPlaceholder')}
+                  aria-label={t('header.searchPlaceholder')}
+                  className="h-8 min-w-0 pr-9 text-sm"
+                />
+                <button
+                  type="submit"
+                  aria-label={t('header.searchPlaceholder')}
+                  className="text-muted-foreground hover:text-foreground absolute right-1 flex h-7 w-7 items-center justify-center rounded-sm"
+                >
+                  <Search className="h-4 w-4" />
+                </button>
+              </form>
+              {/* 千禧风格下日志切换槽位放在搜索框右侧，并参与正常布局；其他风格保留左侧定位。
+                  宽度从 0 展开，入场/退场只做一次单向移动。 */}
+              <motion.div
+                id="log-viewer-topbar-tabs"
+                className={cn(
+                  'absolute top-1/2 left-0 hidden min-w-0 shrink-0 -translate-y-1/2 items-center [&>*]:shrink-0',
+                  workspaceMode === 'logs' && 'sm:flex',
+                  // 展开/收起过程中裁掉尚未露出的部分；静止后放开，避免裁掉键帽阴影。
+                  !(logSwitcherShown && logSwitcherSettled) && 'pointer-events-none overflow-x-clip'
+                )}
+                initial={false}
+                animate={
+                  logSwitcherShown
+                    ? { opacity: 1, width: 'auto', marginLeft: 0 }
+                    : { opacity: 0, width: 0, marginLeft: themeConfig.dashboardStyle === 'millennium' ? 0 : logSwitcherInset }
+                }
+                transition={
+                  logSwitcherShown
+                    ? // 宽度动画跑在主线程：等日志页挂载、上滑完成后再展开，避开最重的那几帧
+                      { duration: 0.36, delay: 0.28, ease: [0.22, 1, 0.36, 1] }
+                    : { duration: 0.28, ease: [0.22, 1, 0.36, 1] }
+                }
+                onAnimationComplete={() => setLogSwitcherSettled(logSwitcherShown)}
+              />
+
               {/* 后端切换按钮（仅 Electron） */}
             {isElectron() && (
               <>
@@ -554,34 +656,50 @@ export function Header({
                 <div className="bg-border h-6 w-px" />
               </>
             )}
-            {/* 搜索框 */}
+            {/* 搜索对话框 */}
+            {(searchOpen || searchDialogLoaded || preloadMobileSearch) && (
+              <Suspense fallback={null}>
+                <SearchDialog
+                  open={searchOpen}
+                  onOpenChange={onSearchOpenChange}
+                  query={searchQuery}
+                  onQueryChange={setSearchQuery}
+                  aiSearchRequestId={aiSearchRequestId}
+                />
+              </Suspense>
+            )}
+
+            <HeaderUpdateButton
+              highlighted={highlightedHeaderAction === 'update'}
+              onPointerEnter={() => handleHeaderActionEnter('update')}
+              onPointerLeave={handleHeaderActionLeave}
+            >
+              {renderHeaderActionPill('update')}
+            </HeaderUpdateButton>
+
+            {/* WebUI 设置 */}
+            <span data-dashboard-header-vent="true" aria-hidden="true" className="hidden" />
             <Button
               variant="ghost"
               size="icon"
-              onClick={() => {
-                setHoveredHeaderAction('search')
-                onSearchOpenChange(!searchOpen)
-              }}
-              aria-label={t('header.searchPlaceholder')}
-              title={t('header.searchPlaceholder')}
-              data-dashboard-header-action="true"
-              data-header-action-highlighted={
-                highlightedHeaderAction === 'search' ? 'true' : 'false'
-              }
-              onPointerEnter={() => handleHeaderActionEnter('search')}
-              onPointerLeave={handleHeaderActionLeave}
-              className="relative isolate hidden border-0 bg-transparent shadow-none md:inline-flex"
+              asChild
+              className="relative isolate hidden border-0 bg-transparent shadow-none sm:inline-flex"
             >
-              {renderHeaderActionPill('search')}
-              <Search className="h-4 w-4" />
+              <Link
+                to="/settings"
+                title={t('sidebar.menu.settings')}
+                aria-label={t('sidebar.menu.settings')}
+                data-dashboard-header-action="true"
+                data-header-action-highlighted={
+                  highlightedHeaderAction === 'settings' ? 'true' : 'false'
+                }
+                onPointerEnter={() => handleHeaderActionEnter('settings')}
+                onPointerLeave={handleHeaderActionLeave}
+              >
+                {renderHeaderActionPill('settings')}
+                <Settings className="h-4 w-4" />
+              </Link>
             </Button>
-
-            {/* 搜索对话框 */}
-            {(searchOpen || searchDialogLoaded) && (
-              <Suspense fallback={null}>
-                <SearchDialog open={searchOpen} onOpenChange={onSearchOpenChange} />
-              </Suspense>
-            )}
 
             {/* 麦麦文档链接 */}
             <Button
@@ -604,46 +722,6 @@ export function Header({
               {renderHeaderActionPill('docs')}
               <BookOpen className="h-4 w-4" />
             </Button>
-
-            {/* 语言切换 */}
-            <div className="hidden sm:block">
-              <DropdownMenu open={languageMenuOpen} onOpenChange={setLanguageMenuOpen}>
-                <DropdownMenuTrigger asChild>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    title={t('header.switchLanguage')}
-                    aria-label={t('header.switchLanguage')}
-                    data-dashboard-header-action="true"
-                    data-header-action-highlighted={
-                      highlightedHeaderAction === 'language' ? 'true' : 'false'
-                    }
-                    onPointerEnter={() => handleHeaderActionEnter('language')}
-                    onPointerLeave={handleHeaderActionLeave}
-                    onClick={() => setHoveredHeaderAction('language')}
-                    className="relative isolate border-0 bg-transparent shadow-none"
-                  >
-                    {renderHeaderActionPill('language')}
-                    <Globe className="h-4 w-4" />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end">
-                  {LANGUAGE_CODES.map((code) => (
-                    <DropdownMenuItem
-                      key={code}
-                      onClick={() => i18nInstance.changeLanguage(code)}
-                      className={cn(
-                        'cursor-pointer',
-                        currentLang.split('-')[0] === code && 'text-primary font-semibold'
-                      )}
-                    >
-                      {currentLang.split('-')[0] === code && <Check className="mr-2 h-3 w-3" />}
-                      {LANGUAGE_NAMES[code]}
-                    </DropdownMenuItem>
-                  ))}
-                </DropdownMenuContent>
-              </DropdownMenu>
-            </div>
 
             {/* 主题切换按钮 */}
             <Button
@@ -673,8 +751,8 @@ export function Header({
               )}
             </Button>
 
-            {/* 千禧风格用一颗键帽收起顶栏，取代顶栏下沿的滑条 */}
-            {themeConfig.dashboardStyle === 'millennium' && (
+            {/* 千禧风格用一颗键帽收起顶栏，取代顶栏下沿的滑条；原版风格同样改为顶栏按钮 */}
+            {(themeConfig.dashboardStyle === 'millennium' || isModernStyle) && (
               <Button
                 variant="ghost"
                 size="icon"
@@ -684,37 +762,20 @@ export function Header({
                 aria-expanded={!topbarCollapsed}
                 data-dashboard-header-action="true"
                 data-dashboard-topbar-collapse-key="true"
-                data-header-action-highlighted="false"
+                data-header-action-highlighted={
+                  isModernStyle && highlightedHeaderAction === 'collapse' ? 'true' : 'false'
+                }
+                onPointerEnter={
+                  isModernStyle ? () => handleHeaderActionEnter('collapse') : undefined
+                }
+                onPointerLeave={isModernStyle ? handleHeaderActionLeave : undefined}
                 className="relative isolate hidden border-0 bg-transparent shadow-none sm:inline-flex"
               >
+                {isModernStyle && renderHeaderActionPill('collapse')}
                 <ChevronsUp className="h-5 w-5" />
               </Button>
             )}
 
-            {/* 分隔线 */}
-            <div className="bg-border hidden h-6 w-px sm:block" />
-
-            {/* 登出按钮 */}
-            <Button
-              variant="ghost"
-              size="icon"
-              onClick={() => {
-                setHoveredHeaderAction('logout')
-                void handleLogout()
-              }}
-              title={t('header.logout')}
-              aria-label={t('header.logout')}
-              data-dashboard-header-action="true"
-              data-header-action-highlighted={
-                highlightedHeaderAction === 'logout' ? 'true' : 'false'
-              }
-              onPointerEnter={() => handleHeaderActionEnter('logout')}
-              onPointerLeave={handleHeaderActionLeave}
-              className="relative isolate hidden border-0 bg-transparent shadow-none sm:inline-flex"
-            >
-              {renderHeaderActionPill('logout')}
-              <LogOut className="h-4 w-4" />
-            </Button>
             </LayoutGroup>
 
             <DropdownMenu>
@@ -730,6 +791,12 @@ export function Header({
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="w-48">
+                <DropdownMenuItem asChild>
+                  <Link to="/settings" className="cursor-pointer gap-2">
+                    <Settings className="h-4 w-4" />
+                    {t('sidebar.menu.settings')}
+                  </Link>
+                </DropdownMenuItem>
                 <DropdownMenuItem
                   onClick={(event) => {
                     const newTheme = actualTheme === 'dark' ? 'light' : 'dark'
@@ -744,51 +811,29 @@ export function Header({
                   )}
                   {actualTheme === 'dark' ? t('header.switchToLight') : t('header.switchToDark')}
                 </DropdownMenuItem>
-                <DropdownMenuSub>
-                  <DropdownMenuSubTrigger className="cursor-pointer gap-2">
-                    <Globe className="h-4 w-4" />
-                    {t('header.switchLanguage')}
-                  </DropdownMenuSubTrigger>
-                  <DropdownMenuSubContent alignOffset={-4}>
-                    {LANGUAGE_CODES.map((code) => (
-                      <DropdownMenuItem
-                        key={code}
-                        onClick={() => i18nInstance.changeLanguage(code)}
-                        className={cn(
-                          'cursor-pointer',
-                          currentLang.split('-')[0] === code && 'text-primary font-semibold'
-                        )}
-                      >
-                        {currentLang.split('-')[0] === code && <Check className="mr-2 h-3 w-3" />}
-                        {LANGUAGE_NAMES[code]}
-                      </DropdownMenuItem>
-                    ))}
-                  </DropdownMenuSubContent>
-                </DropdownMenuSub>
-                <DropdownMenuItem onClick={handleLogout} className="cursor-pointer gap-2">
-                  <LogOut className="h-4 w-4" />
-                  {t('header.logoutLabel')}
-                </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
           </div>
         </div>
 
-        <div className="absolute right-5 bottom-[-7px] z-10 flex h-0 shrink-0 items-center justify-end sm:right-15.5">
-          <button
-            type="button"
-            data-dashboard-topbar-toggle="true"
-            onClick={onTopbarToggle}
-            aria-label={topbarCollapsed ? t('header.expandTopbar') : t('header.collapseTopbar')}
-            aria-expanded={!topbarCollapsed}
-            title={topbarCollapsed ? t('header.expandTopbar') : t('header.collapseTopbar')}
-            className="bg-foreground/70 flex h-3 w-24 shrink-0 items-center justify-center transition-shadow"
-          >
-            <span className="sr-only">
-              {topbarCollapsed ? t('header.expandTopbar') : t('header.collapseTopbar')}
-            </span>
-          </button>
-        </div>
+        {/* 顶栏收起拉片只服务桌面布局，手机上不显示；原版风格改用顶栏里的收起按钮 */}
+        {!isModernStyle && (
+          <div className="absolute right-5 bottom-[-7px] z-10 flex h-0 shrink-0 items-center justify-end max-lg:hidden sm:right-15.5">
+            <button
+              type="button"
+              data-dashboard-topbar-toggle="true"
+              onClick={onTopbarToggle}
+              aria-label={topbarCollapsed ? t('header.expandTopbar') : t('header.collapseTopbar')}
+              aria-expanded={!topbarCollapsed}
+              title={topbarCollapsed ? t('header.expandTopbar') : t('header.collapseTopbar')}
+              className="bg-foreground/70 flex h-3 w-24 shrink-0 items-center justify-center transition-shadow"
+            >
+              <span className="sr-only">
+                {topbarCollapsed ? t('header.expandTopbar') : t('header.collapseTopbar')}
+              </span>
+            </button>
+          </div>
+        )}
       </div>
     </motion.header>
   )

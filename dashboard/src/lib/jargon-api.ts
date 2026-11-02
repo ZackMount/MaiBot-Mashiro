@@ -12,6 +12,7 @@ import type {
   JargonDeleteResponse,
   JargonDetailResponse,
   JargonExportResponse,
+  JargonGroupListResponse,
   JargonImportRequest,
   JargonImportResponse,
   JargonListResponse,
@@ -21,6 +22,13 @@ import type {
 } from '@/types/jargon'
 
 const API_BASE = '/api/webui/jargon'
+
+/** 获取黑话配置中的共享组与已解析的聊天成员。 */
+export async function getJargonGroups(): Promise<JargonGroupListResponse> {
+  return backendApi.get<JargonGroupListResponse>(`${API_BASE}/groups`, {
+    errorMessage: '获取黑话共享组失败',
+  })
+}
 
 /**
  * 获取聊天列表（有黑话记录的聊天）
@@ -42,6 +50,8 @@ export async function getJargonList(params: {
   page_size?: number
   search?: string
   session_id?: string
+  session_ids?: string[]
+  sort_by?: 'time' | 'time_asc' | 'created' | 'created_asc'
   jargon_status?: 'confirmed_jargon' | 'confirmed_not_jargon' | 'manual_jargon' | 'pending'
   is_jargon?: boolean | null
   is_complete?: boolean
@@ -53,6 +63,8 @@ export async function getJargonList(params: {
       page_size: params.page_size || undefined,
       search: params.search || undefined,
       session_id: params.session_id || undefined,
+      session_ids: params.session_ids,
+      sort_by: params.sort_by,
       jargon_status: params.jargon_status,
       is_jargon: params.is_jargon,
       is_complete: params.is_complete,
@@ -76,11 +88,13 @@ export async function getJargonDetail(jargonId: number): Promise<JargonDetailRes
  */
 export async function exportJargons(params: {
   ids?: number[]
+  session_ids?: string[]
   include_chat_info?: boolean
 }): Promise<JargonExportResponse> {
   return backendApi.post<JargonExportResponse>(`${API_BASE}/export`, {
     body: {
       ids: params.ids,
+      session_ids: params.session_ids,
       include_chat_info: params.include_chat_info ?? false,
     },
     errorMessage: '导出黑话失败',

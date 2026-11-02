@@ -695,6 +695,8 @@ class OpenAIResponsesClient(OpenaiClient):
             )
             request_overrides = split_openai_request_overrides(request.extra_params)
             extra_body = dict(request_overrides.extra_body)
+            if request.tool_choice is not None:
+                extra_body["tool_choice"] = request.tool_choice
 
             for protected_key in ("input", "model", "previous_response_id", "stream"):
                 if protected_key in extra_body:
@@ -736,7 +738,7 @@ class OpenAIResponsesClient(OpenaiClient):
                     temperature=temperature if temperature is not None else omit,
                     store=store,
                     stream=bool(model_info.force_stream_mode),
-                    extra_headers=request_overrides.extra_headers or None,
+                    extra_headers=self._build_request_headers(request_overrides.extra_headers),
                     extra_query=request_overrides.extra_query or None,
                     extra_body=extra_body or None,
                 )
@@ -775,21 +777,25 @@ class OpenAIResponsesClient(OpenaiClient):
             }
             return response
         except (EmptyResponseException, RespParseException) as exc:
-            self._attach_failure_snapshot(exc, request, snapshot_provider_request)
+            await asyncio.to_thread(self._attach_failure_snapshot, exc, request, snapshot_provider_request)
             raise
         except APIConnectionError as exc:
             wrapped_error = NetworkConnectionError(str(exc))
-            self._attach_failure_snapshot(wrapped_error, request, snapshot_provider_request, original_error=exc)
+            await asyncio.to_thread(
+                self._attach_failure_snapshot, wrapped_error, request, snapshot_provider_request, original_error=exc
+            )
             raise wrapped_error from exc
         except APIStatusError as exc:
             wrapped_error = RespNotOkException(exc.status_code, _build_api_status_message(exc))
-            self._attach_failure_snapshot(wrapped_error, request, snapshot_provider_request, original_error=exc)
+            await asyncio.to_thread(
+                self._attach_failure_snapshot, wrapped_error, request, snapshot_provider_request, original_error=exc
+            )
             raise wrapped_error from exc
         except ReqAbortException:
             raise
         except Exception as exc:
             if not has_request_snapshot(exc):
-                self._attach_failure_snapshot(exc, request, snapshot_provider_request)
+                await asyncio.to_thread(self._attach_failure_snapshot, exc, request, snapshot_provider_request)
             raise
 
     def _attach_failure_snapshot(

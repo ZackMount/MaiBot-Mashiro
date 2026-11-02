@@ -13,14 +13,15 @@ from src.chat.replyer.expression_vector_index import expression_vector_index
 from src.common.database.database import get_db_session
 from src.common.database.database_model import Expression, ModifiedBy
 from src.common.logger import get_logger
+from src.common.prompt_i18n import load_prompt
 from src.common.utils.utils_config import ChatConfigUtils, ExpressionConfigUtils
 from src.config.config import global_config, model_config
 from src.learners.expression_style_utils import (
     is_prompt_example_expression_style,
     normalize_expression_style_for_learning,
 )
-from src.learners.learner_utils_old import weighted_sample
-from src.maisaka.context.messages import LLMContextMessage, ModelOutputContextMessage, SessionBackedMessage
+from src.learners.weighted_sampling import weighted_sample
+from src.maisaka.context.messages import ContentContextMessage, LLMContextMessage, ModelOutputContextMessage
 
 logger = get_logger("maisaka_expression_selector")
 
@@ -181,7 +182,7 @@ class MaisakaExpressionSelector:
             f"""- 当"{expression['situation']}"时，可以用"{expression['style']}"来表达。"""
             for expression in selected_expressions
         ]
-        return "【表达习惯参考，请视情况自然的使用】\n" + "\n".join(lines)
+        return "你可以视情况自由使用以下句式：\n" + "\n".join(lines)
 
     @staticmethod
     def _normalize_history_line(message: LLMContextMessage) -> str:
@@ -270,14 +271,10 @@ class MaisakaExpressionSelector:
             for candidate in candidates
         ]
 
-        return (
-            "你是 Maisaka 的表达方式选择子代理。\n"
-            "你只负责根据下方真实聊天上下文，为这一次可见回复挑选最合适的表达方式。\n"
-            f"请只从下面候选中选择 0 到 {MAX_SELECTED_EXPRESSIONS} 条最适合当前语境的表达方式。\n"
-            "优先考虑自然、贴合上下文、不生硬、不模板化。\n"
-            "如果没有明显合适的，就返回空数组。\n"
-            '严格只输出 JSON，对象格式为 {"selected_ids":[123,456]}。\n\n'
-            f"候选表达方式：\n{chr(10).join(candidate_lines)}"
+        return load_prompt(
+            "maisaka_expression_selector",
+            max_selected=MAX_SELECTED_EXPRESSIONS,
+            candidates="\n".join(candidate_lines),
         )
 
     def _parse_selected_ids(self, raw_response: str, candidates: List[dict[str, Any]]) -> List[int]:
@@ -349,7 +346,7 @@ class MaisakaExpressionSelector:
     def _serialize_context_message(message: LLMContextMessage) -> dict[str, Any]:
         timestamp = message.timestamp.isoformat() if isinstance(message.timestamp, datetime) else ""
         # chat_history 还含表情候选快照、工具结果等没有 source_kind 字段的消息，这些消息改用基类的 source。
-        if isinstance(message, (SessionBackedMessage, ModelOutputContextMessage)):
+        if isinstance(message, (ContentContextMessage, ModelOutputContextMessage)):
             source_kind = message.source_kind
         else:
             source_kind = message.source
@@ -526,6 +523,13 @@ class MaisakaExpressionSelector:
         candidates: List[dict[str, Any]],
         sub_agent_runner: Optional[SubAgentRunner],
     ) -> MaisakaExpressionSelectionResult:
+        # 快速档直接使用加权抽样候选，由回复模型自行参考，不再额外请求选择模型。
+        if not self._use_vector_candidate_pool():
+            return self._build_direct_selection_result(
+                session_id=session_id,
+                candidates=candidates,
+            )
+
         if sub_agent_runner is None:
             logger.info("表达方式 LLM 选择已跳过：缺少子代理执行器，回退为直接注入")
             return self._build_direct_selection_result(

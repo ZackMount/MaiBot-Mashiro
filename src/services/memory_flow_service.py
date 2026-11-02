@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Awaitable, Dict, List, Optional
 
 import asyncio
 import json
@@ -25,8 +25,7 @@ from src.A_memorix.core.image.component_paths import build_chat_external_ref, it
 from src.A_memorix.host_service import a_memorix_host_service
 
 from .image_writeback_journal import ImageWritebackJournal
-from .person_fact_verifier import verify_direct_person_fact
-from .person_fact_reverification import reverify_historical_person_facts
+from .person_fact_reverification import reclassify_historical_person_facts
 
 logger = get_logger("memory_flow_service")
 
@@ -41,7 +40,7 @@ class PersonFactWritebackService:
     def __init__(self) -> None:
         self._queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=256)
         self._worker_task: Optional[asyncio.Task] = None
-        self._reverify_task: Optional[asyncio.Task] = None
+        self._reclassify_task: Optional[asyncio.Task] = None
         self._stopping = False
         self._extractor: Any | None = None
 
@@ -50,14 +49,14 @@ class PersonFactWritebackService:
             return
         self._stopping = False
         self._worker_task = asyncio.create_task(self._worker_loop(), name="A_Memorix.person_fact_writeback")
-        self._reverify_task = asyncio.create_task(self._historical_reverify_loop(), name="A_Memorix.person_fact_reverify")
+        self._reclassify_task = asyncio.create_task(self._historical_reclassify_loop(), name="A_Memorix.person_fact_reclassify")
 
     async def shutdown(self) -> None:
         self._stopping = True
         worker = self._worker_task
         self._worker_task = None
-        reverify_task = self._reverify_task
-        self._reverify_task = None
+        reverify_task = self._reclassify_task
+        self._reclassify_task = None
         if reverify_task is not None:
             reverify_task.cancel()
             try:
@@ -74,10 +73,10 @@ class PersonFactWritebackService:
         except Exception as exc:
             logger.warning(f"关闭人物事实写回 worker 失败: {exc}")
 
-    async def _historical_reverify_loop(self) -> None:
-        """后台分批重验旧事实，游标落在记忆数据目录以支持重启续跑。"""
+    async def _historical_reclassify_loop(self) -> None:
+        """后台分批恢复旧自动提取事实的分类，持久化游标以支持重启续跑。"""
 
-        state_path = a_memorix_host_service.get_runtime_data_dir() / "person_fact_reverify_cursor.json"
+        state_path = a_memorix_host_service.get_runtime_data_dir() / "person_fact_classification_cursor.json"
         await asyncio.sleep(5)
         while not self._stopping:
             try:
@@ -89,9 +88,9 @@ class PersonFactWritebackService:
                     continue
                 state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
                 if not isinstance(state, dict):
-                    raise ValueError("历史人物事实重验进度文件格式错误")
+                    raise ValueError("历史人物事实分类进度文件格式错误")
                 cursor = str(state.get("cursor", "") or "")
-                result = await reverify_historical_person_facts(cursor=cursor, limit=50)
+                result = await reclassify_historical_person_facts(cursor=cursor, limit=50)
                 next_cursor = str(result["next_cursor"]) if result["has_more"] else ""
                 state_path.parent.mkdir(parents=True, exist_ok=True)
                 temporary_path = state_path.with_suffix(".json.tmp")
@@ -104,7 +103,7 @@ class PersonFactWritebackService:
                 temporary_path.write_text(json.dumps(progress, ensure_ascii=False), encoding="utf-8")
                 os.replace(temporary_path, state_path)
                 if int(result["promoted"]):
-                    logger.info(f"历史人物事实重验完成一批：晋升 {result['promoted']} 条")
+                    logger.info(f"历史人物事实分类完成一批：晋升 {result['promoted']} 条")
                 if result["has_more"]:
                     await asyncio.sleep(1)
                 else:
@@ -112,7 +111,7 @@ class PersonFactWritebackService:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                logger.error(f"历史人物事实重验失败: {exc}", exc_info=True)
+                logger.error(f"历史人物事实分类失败: {exc}", exc_info=True)
                 await asyncio.sleep(60)
 
     async def enqueue(self, message: Any) -> None:
@@ -179,26 +178,16 @@ class PersonFactWritebackService:
             fact = str(item.get("fact", "") if isinstance(item, dict) else item).strip()
             if not fact:
                 continue
-            message_id = str(item.get("evidence_message_id", "") if isinstance(item, dict) else "").strip()
-            quote = str(item.get("evidence_quote", "") if isinstance(item, dict) else "").strip()
-            verified = verify_direct_person_fact(
-                fact=fact,
-                evidence_message_id=message_id,
-                evidence_quote=quote,
-                person_id=str(target_person.person_id),
-                person_name=person_name,
-                session_id=session_id,
-            )
+            # 语义判断由提取模型完成，来源 ID 由本次实际输入的消息确定。
+            # 记录完整的提取上下文，不把模型生成的消息 ID 写成真实证据。
             await store_person_memory_from_answer(
                 person_name,
                 fact,
                 session_id,
                 person_id=str(getattr(target_person, "person_id", "") or "").strip(),
                 evidence_source="user_supported",
-                evidence_message_ids=[message_id] if verified else evidence_message_ids,
-                fact_claim={"trust": "server_verified", "authority": "direct_user", "stability": "stable"}
-                if verified
-                else None,
+                evidence_message_ids=evidence_message_ids,
+                fact_claim={"authority": "direct_user", "stability": "stable", "profile_section": "stable_facts"},
             )
 
     def _resolve_target_person(self, message: Any) -> Optional[Person]:
@@ -442,7 +431,7 @@ class PersonFactWritebackService:
 
     @staticmethod
     def _parse_fact_items(raw: str) -> List[Any]:
-        """兼容旧格式；旧格式缺少证据，只能写为未确认事实。"""
+        """解析提取结果，同时兼容字符串数组格式。"""
 
         text = str(raw or "").strip()
         if not text:
@@ -646,15 +635,25 @@ class ChatSummaryWritebackService:
             if metadata_store is None:
                 return 0
 
-            checkpoint_count = metadata_store.get_summary_checkpoint_count(session_id)
-            paragraphs = metadata_store.get_paragraphs_by_source(f"chat_summary:{session_id}")
+            checkpoint_count, paragraphs = await asyncio.to_thread(
+                lambda: (
+                    metadata_store.get_summary_checkpoint_count(session_id),
+                    metadata_store.get_paragraphs_by_source(f"chat_summary:{session_id}"),
+                )
+            )
             if not paragraphs:
                 return min(total_message_count, checkpoint_count)
 
-            latest_paragraph = max(paragraphs, key=self._paragraph_created_at)
-            metadata = self._paragraph_metadata(latest_paragraph)
-            trigger_message_count = self._coerce_positive_int(metadata.get("trigger_message_count"))
-            if trigger_message_count > 0:
+            # 正文去重会复用较早的段落，created_at 不能代表最后完成的窗口。
+            trigger_message_count = max(
+                (
+                    self._coerce_positive_int(metadata.get("trigger_message_count"))
+                    for paragraph in paragraphs
+                    if (metadata := self._paragraph_metadata(paragraph)).get("chat_id", session_id) == session_id
+                ),
+                default=0,
+            )
+            if max(trigger_message_count, checkpoint_count) > 0:
                 return min(total_message_count, max(trigger_message_count, checkpoint_count))
 
             # 兼容旧摘要数据：没有触发计数时，只能退化为对齐当前计数，
@@ -1018,13 +1017,59 @@ class MemoryAutomationService:
     async def on_incoming_message(self, message: Any) -> None:
         if not self._started:
             await self.start()
-        await self.image_writeback.enqueue(message)
+        await self._run_message_tasks(self._observe_sender_identity(message), self.image_writeback.enqueue(message))
 
     async def on_message_sent(self, message: Any) -> None:
         if not self._started:
             await self.start()
-        await self.fact_writeback.enqueue(message)
-        await self.chat_summary_writeback.enqueue(message)
+        await self._run_message_tasks(
+            self._observe_sender_identity(message),
+            self.fact_writeback.enqueue(message),
+            self.chat_summary_writeback.enqueue(message),
+        )
+
+    @staticmethod
+    async def _run_message_tasks(*tasks: Awaitable[None]) -> None:
+        """独立完成身份登记和各队列入队，再向调用方完整报告失败。"""
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        failures: List[Exception] = []
+        for result in results:
+            if isinstance(result, asyncio.CancelledError):
+                raise result
+            if isinstance(result, Exception):
+                failures.append(result)
+        if failures:
+            raise ExceptionGroup("记忆身份登记或写回入队失败", failures)
+
+    @staticmethod
+    async def _observe_sender_identity(message: Any) -> None:
+        """在昵称被后续消息覆盖前，按真实发送者 ID 保存本次观察到的称呼。"""
+        if not global_config.a_memorix.plugin.enabled:
+            return
+        user = message.message_info.user_info
+        group = message.message_info.group_info
+        if not message.platform.strip() or not user.user_id.strip():
+            raise ValueError("消息缺少真实的发送者 platform/user_id")
+        identity = {
+            "platform": message.platform,
+            "user_id": user.user_id,
+            "aliases": [user.user_nickname, user.user_cardname or ""],
+            "group_id": group.group_id if group else "",
+        }
+        # 短暂的内核初始化或存储故障可以重试；原始 ID 和本次昵称始终来自同一条消息。
+        for attempt in range(3):
+            try:
+                result = await memory_service.profile_admin(action="observe_identity", **identity)
+                if not result.get("success"):
+                    detail = result.get("error") or result.get("message") or result.get("reason")
+                    raise RuntimeError(f"登记发送者身份失败: {detail}")
+                return
+            except Exception:
+                if attempt == 2:
+                    raise
+                delay = 0.1 * (attempt + 1)
+                logger.warning(f"登记发送者身份失败，{delay:.1f} 秒后重试", exc_info=True)
+                await asyncio.sleep(delay)
 
 
 memory_automation_service = MemoryAutomationService()

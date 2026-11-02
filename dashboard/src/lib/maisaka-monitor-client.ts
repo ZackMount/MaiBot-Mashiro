@@ -5,6 +5,7 @@
  */
 import type { WsEventEnvelope } from './unified-ws'
 
+import { PlannerDeltaDecoder } from './maisaka-planner-delta'
 import { unifiedWsClient } from './unified-ws'
 
 // ─── 事件数据类型 ───────────────────────────────────────────────
@@ -45,6 +46,7 @@ export interface StageStatusEvent {
   detail: string
   round_text: string
   agent_state: string
+  wait_until?: number | null
   stage_started_at: number
   updated_at: number
   timestamp: number
@@ -62,6 +64,30 @@ export interface StageRemovedEvent {
 export interface StageSnapshotEvent {
   entries: StageStatusEvent[]
   timestamp: number
+}
+
+export interface FlowStepEvent {
+  session_id: string
+  run_id: string
+  cycle_id: number | null
+  step: string
+  title: string
+  detail: string
+  timestamp: number
+  trim?: {
+    removed_count: number
+    remaining_count: number
+    learning: {
+      status: 'pending' | 'running' | 'waiting' | 'completed' | 'no_results' | 'skipped' | 'cancelled' | 'failed'
+      detail: string
+      learners: {
+        name: string
+        status: 'running' | 'waiting' | 'completed' | 'no_results' | 'skipped' | 'disabled' | 'failed' | 'cancelled'
+        detail: string
+        contents: string[]
+      }[]
+    }
+  }
 }
 
 export interface LlmRetryEvent {
@@ -194,7 +220,8 @@ export interface ToolExecutionEvent {
 }
 
 export interface MaisakaRequestBlock {
-  messages: MaisakaMessage[]
+  /** 完整请求仅旧版监控载荷携带；新版通过推理详情页读取。 */
+  messages?: MaisakaMessage[]
   selected_history_count: number
   tool_count: number
   context_sections?: MaisakaContextSection[]
@@ -218,6 +245,8 @@ export interface MaisakaNativeToolCall {
 
 export interface MaisakaPlannerBlock {
   content: string | null
+  reasoning?: string | null
+  model_name?: string | null
   tool_calls: MaisakaToolCall[]
   native_tool_calls?: MaisakaNativeToolCall[]
   prompt_tokens: number
@@ -244,12 +273,19 @@ export interface MaisakaTimingGateBlock {
 }
 
 export interface MaisakaFinalizedToolResult {
+  session_id?: string
+  session_name?: string
+  started_at?: number
+  ended_at?: number
   tool_call_id: string
   tool_name: string
+  model_name?: string
+  images?: { thumbnail_url: string; label: string; error?: string }[]
   tool_args: Record<string, unknown>
   tool_call_source?: string
   tool_call_source_label?: string
   success: boolean
+  error_message?: string
   stop_after_execution?: boolean
   duration_ms: number
   summary: string
@@ -260,6 +296,10 @@ export interface MaisakaFinalizedToolResult {
 }
 
 export interface PlannerFinalizedEvent {
+  focus_scope_id?: string
+  focus_session_ids?: string[]
+  planner_started_at?: number | null
+  planner_ended_at?: number | null
   session_id: string
   cycle_id: number
   run_id?: string
@@ -300,11 +340,96 @@ export interface ReplierResponseEvent {
 
 // ─── 统一事件联合类型 ─────────────────────────────────────────
 
+/** 子代理任务开始；call_id 是 Planner 发起这次派发的工具调用 id */
+export interface SubagentStartedEvent {
+  session_id: string
+  task_id: string
+  call_id: string
+  description: string
+  granted_tools: string[]
+  /** 是否在后台运行（开启高级子代理） */
+  background: boolean
+  max_rounds: number
+  timestamp: number
+}
+
+/** 子代理一轮模型输出 */
+export interface SubagentRoundEvent {
+  session_id: string
+  task_id: string
+  round_index: number
+  content: string
+  tool_calls: MaisakaToolCall[]
+  timestamp: number
+}
+
+/** 子代理内部一次工具调用的结果摘要 */
+export interface SubagentToolResultEvent {
+  session_id: string
+  task_id: string
+  round_index: number
+  call_id: string
+  tool_name: string
+  success: boolean
+  summary: string
+  duration_ms: number
+  timestamp: number
+}
+
+export type SubagentTaskStatus = 'running' | 'completed' | 'failed' | 'stopped'
+
+/** 子代理任务结束：完成、失败或被终止 */
+export interface SubagentFinishedEvent {
+  session_id: string
+  task_id: string
+  status: SubagentTaskStatus
+  conclusion: string
+  error_message: string
+  tool_usage: Record<string, number>
+  duration_ms: number
+  timestamp: number
+}
+
+/** 订阅后下发的单个聊天流概要；时间线本身按页另行加载 */
+export interface SessionSummary {
+  session_id: string
+  event_count: number
+  last_event_id: number
+  last_activity: number
+  session_start: SessionStartEvent | null
+  latest_message: {
+    event: 'message.ingested' | 'message.sent'
+    data: MessageIngestedEvent | MessageSentEvent
+  } | null
+}
+
+export interface SessionsSnapshotEvent {
+  sessions: SessionSummary[]
+  timestamp: number
+}
+
+/** 随首页历史补发的子代理事件，只用于重建子代理面板，不进入时间线 */
+export interface SubagentHistoryEvent {
+  session_id: string
+  events: { event: string; data: Record<string, unknown> }[]
+}
+
+/** 一页历史加载结果；事件本身经事件通道先于该结果到达 */
+export interface MonitorHistoryPage {
+  count: number
+  oldestEventId: number
+  hasMore: boolean
+}
+
 export type MaisakaMonitorEvent =
+  | { type: 'replay.started'; data: Record<string, never> }
+  | { type: 'sessions.snapshot'; data: SessionsSnapshotEvent }
+  | { type: 'subagent.history'; data: SubagentHistoryEvent }
   | { type: 'session.start'; data: SessionStartEvent }
   | { type: 'stage.status'; data: StageStatusEvent }
   | { type: 'stage.removed'; data: StageRemovedEvent }
   | { type: 'stage.snapshot'; data: StageSnapshotEvent }
+  | { type: 'flow.step'; data: FlowStepEvent }
   | { type: 'llm.retry'; data: LlmRetryEvent }
   | { type: 'llm.error'; data: LlmErrorEvent }
   | { type: 'message.ingested'; data: MessageIngestedEvent }
@@ -318,18 +443,25 @@ export type MaisakaMonitorEvent =
   | { type: 'tool.execution'; data: ToolExecutionEvent }
   | { type: 'replier.request'; data: ReplierRequestEvent }
   | { type: 'replier.response'; data: ReplierResponseEvent }
+  | { type: 'subagent.started'; data: SubagentStartedEvent }
+  | { type: 'subagent.round'; data: SubagentRoundEvent }
+  | { type: 'subagent.tool_result'; data: SubagentToolResultEvent }
+  | { type: 'subagent.finished'; data: SubagentFinishedEvent }
 
 export type MaisakaEventListener = (event: MaisakaMonitorEvent) => void
 
 // ─── 客户端 ───────────────────────────────────────────────────
 
+/** 每页拉取的历史事件数 */
+const HISTORY_PAGE_SIZE = 100
+/** 历史页经事件通道逐条下发，慢链路上比普通请求耗时更长 */
+const HISTORY_REQUEST_TIMEOUT_MS = 30000
+
 class MaisakaMonitorClient {
+  private readonly plannerDecoder = new PlannerDeltaDecoder()
   private initialized = false
-  private readonly initialReplayLimit = 1000
   private listenerIdCounter = 0
   private listeners: Map<number, MaisakaEventListener> = new Map()
-  private replayCursor = 0
-  private readonly replayLimit = 10000
   private subscriptionActive = false
   private subscriptionPromise: Promise<void> | null = null
   private deferredUnsubTimer: ReturnType<typeof setTimeout> | null = null
@@ -344,10 +476,22 @@ class MaisakaMonitorClient {
         return
       }
 
-      const event: MaisakaMonitorEvent = {
-        type: message.event as MaisakaMonitorEvent['type'],
-        data: message.data as never,
+      // 先重建快照再去重；即使基准事件已入账，也必须更新解码基准。
+      let decoded: WsEventEnvelope | null
+      try {
+        decoded = this.plannerDecoder.decode(message)
+      } catch (error) {
+        // 基准损坏后继续收增量会一直丢失内容，重连从账本恢复完整快照。
+        console.error('MaiSaka 监控增量解码失败，重新连接:', error)
+        void unifiedWsClient.restart().catch((restartError) => {
+          console.error('MaiSaka 监控重新连接失败:', restartError)
+        })
+        return
       }
+      if (!decoded && message.event !== 'planner.reset') return
+      const event: MaisakaMonitorEvent = decoded
+        ? { type: decoded.event as MaisakaMonitorEvent['type'], data: decoded.data as never }
+        : { type: 'replay.started', data: {} }
 
       this.listeners.forEach((listener) => {
         try {
@@ -363,8 +507,8 @@ class MaisakaMonitorClient {
 
   private getReplaySubscribeData(): Record<string, unknown> {
     return {
-      since_event_id: this.replayCursor,
-      replay_limit: this.replayCursor > 0 ? this.replayLimit : this.initialReplayLimit,
+      // 订阅只同步各聊天流概要与当前阶段，时间线由 loadHistory 按聊天流分页拉取。
+      mode: 'paged',
     }
   }
 
@@ -388,23 +532,8 @@ class MaisakaMonitorClient {
     return true
   }
 
-  private async replayFromCursor(): Promise<void> {
+  private async replayHistory(): Promise<void> {
     await unifiedWsClient.subscribe('maisaka_monitor', 'main', this.getReplaySubscribeData())
-  }
-
-  updateReplayCursor(eventId: number): void {
-    if (!Number.isFinite(eventId) || eventId <= this.replayCursor) {
-      return
-    }
-    this.replayCursor = Math.floor(eventId)
-    unifiedWsClient.updateSubscriptionData('maisaka_monitor', 'main', this.getReplaySubscribeData())
-  }
-
-  setInitialReplayCursor(eventId: number): void {
-    if (!Number.isFinite(eventId) || eventId < 0) {
-      return
-    }
-    this.replayCursor = Math.max(this.replayCursor, Math.floor(eventId))
   }
 
   async subscribe(listener: MaisakaEventListener): Promise<() => Promise<void>> {
@@ -421,7 +550,7 @@ class MaisakaMonitorClient {
     try {
       const createdSubscription = await this.ensureSubscribed()
       if (!createdSubscription) {
-        await this.replayFromCursor()
+        await this.replayHistory()
       }
     } catch (error) {
       // 订阅失败时调用方拿不到退订函数，必须在这里回收监听器
@@ -441,6 +570,25 @@ class MaisakaMonitorClient {
           }
         }, 200)
       }
+    }
+  }
+
+  /** 拉取某个聊天流早于 beforeEventId 的一页历史；不传时拉取最新一页 */
+  async loadHistory(
+    sessionId: string,
+    beforeEventId?: number,
+    limit = HISTORY_PAGE_SIZE
+  ): Promise<MonitorHistoryPage> {
+    const result = await unifiedWsClient.call({
+      domain: 'maisaka_monitor',
+      method: 'history.load',
+      data: { session_id: sessionId, before_event_id: beforeEventId ?? 0, limit },
+      timeoutMs: HISTORY_REQUEST_TIMEOUT_MS,
+    })
+    return {
+      count: Number(result.count) || 0,
+      oldestEventId: Number(result.oldest_event_id) || 0,
+      hasMore: result.has_more === true,
     }
   }
 

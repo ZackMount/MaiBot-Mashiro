@@ -15,7 +15,6 @@ import asyncio
 import base64
 import hashlib
 import time
-import traceback
 from datetime import datetime
 
 from src.chat.message_receive.chat_manager import BotChatSession
@@ -233,9 +232,15 @@ async def _invoke_send_hook(
         tuple[HookDispatchResult, SessionMessage]: Hook 聚合结果以及可能被改写后的消息对象。
     """
 
+    serialized_message = serialize_session_message(message)
+    if hook_name == "send_service.after_send" and kwargs.get("sent"):
+        from src.common.runtime_loop import run_on_main_loop
+        from src.desktop_pet.service import desktop_pet_service
+
+        await run_on_main_loop(desktop_pet_service.notify_reply(serialized_message))
     hook_result = await _get_runtime_manager().invoke_hook(
         hook_name,
-        message=serialize_session_message(message),
+        message=serialized_message,
         **kwargs,
     )
     mutated_message = message
@@ -272,12 +277,8 @@ def _inherit_platform_io_route_metadata(target_stream: BotChatSession) -> Dict[s
                 if normalized_value:
                     inherited_metadata[key] = value
 
-    # 当目标会话没有可继承的上下文消息时，至少补齐当前平台账号，
-    # 让按 ``platform + account_id`` 绑定的路由仍有机会命中。
-    if not RouteKeyFactory.extract_components(inherited_metadata)[0]:
-        bot_account = get_bot_account(target_stream.platform, target_stream.account_id)
-        if bot_account:
-            inherited_metadata["platform_io_account_id"] = bot_account
+    # 账号和作用域通过出站消息正式字段继承，不再写入 additional_config。
+    # 暂时保留旧上下文元数据的透传以兼容尚未迁移的适配器，下个版本移除。
 
     if target_stream.group_id and (normalized_group_id := str(target_stream.group_id).strip()):
         inherited_metadata["platform_io_target_group_id"] = normalized_group_id
@@ -557,11 +558,11 @@ def _build_outbound_session_message(
             and target_stream.context.message.message_info.group_info
         ):
             group_name = target_stream.context.message.message_info.group_info.group_name
-        if group_name:
-            group_info = GroupInfo(
-                group_id=target_stream.group_id,
-                group_name=group_name,
-            )
+        # 群名仅用于显示；官方适配器可能不提供群名，仍须保留群 ID 以按群聊发送。
+        group_info = GroupInfo(
+            group_id=target_stream.group_id,
+            group_name=group_name,
+        )
 
     additional_config: Dict[str, object] = _inherit_platform_io_route_metadata(target_stream)
     if selected_expressions is not None:
@@ -572,6 +573,8 @@ def _build_outbound_session_message(
         timestamp=datetime.fromtimestamp(current_time),
         platform=target_stream.platform,
     )
+    outbound_message.account_id = bot_user_id
+    outbound_message.scope = target_stream.scope
     outbound_message.message_info = MessageInfo(
         user_info=UserInfo(
             user_id=bot_user_id,
@@ -671,10 +674,31 @@ async def _prepare_message_for_platform_io(
 
     if set_reply or not message.processed_plain_text:
         message.processed_plain_text = _build_processed_plain_text(message)
+    from src.files.service import disk_call, get_file_service
+
+    # 所有出站驱动共用归属检查，包括 WebUI、本地驱动和转发节点。
+    pending = list(message.raw_message.components)
+    while pending:
+        component = pending.pop()
+        if isinstance(component, ForwardNodeComponent):
+            for node in component.forward_components:
+                pending.extend(node.content)
+        elif isinstance(component, FileComponent) and component.file_ref:
+            file_service = get_file_service()
+            file_service.require_enabled()
+            asset = await disk_call(file_service.store.get, component.file_ref, message.session_id)
+            component.name, component.size, component.mime_type = asset.name, str(asset.size), asset.mime_type
+            component.url, component.base64_data = "", ""
     if typing:
+        # 纯图片分段与表情包一样使用固定等待，避免按图片描述长度模拟打字。
+        components = message.raw_message.components
+        is_image = any(isinstance(component, ImageComponent) for component in components) and not any(
+            isinstance(component, TextComponent) and component.text.strip() for component in components
+        )
         typing_time = calculate_typing_time(
             input_string=message.processed_plain_text or "",
             is_emoji=message.is_emoji,
+            is_image=is_image,
         )
         await asyncio.sleep(typing_time)
 
@@ -869,8 +893,7 @@ async def _send_via_platform_io(
     try:
         await platform_io_manager.ensure_send_pipeline_ready()
     except Exception as exc:
-        logger.error(f"[SendService] 准备 Platform IO 发送管线失败: {exc}")
-        logger.debug(traceback.format_exc())
+        logger.error(f"[SendService] 准备 Platform IO 发送管线失败: {exc}", exc_info=True)
         return None
 
     try:
@@ -893,8 +916,7 @@ async def _send_via_platform_io(
             metadata={"show_log": False},
         )
     except Exception as exc:
-        logger.error(f"[SendService] Platform IO 发送异常: {exc}")
-        logger.debug(traceback.format_exc())
+        logger.error(f"[SendService] Platform IO 发送异常: {exc}", exc_info=True)
         return None
 
     sent = bool(delivery_batch.has_success)
@@ -923,10 +945,26 @@ async def _send_via_platform_io(
         )
         if should_log_delivery:
             successful_driver_ids = [receipt.driver_id or "unknown" for receipt in delivery_batch.sent_receipts]
+            logger.debug(
+                f"投递成功 平台={route_key.platform} 驱动={', '.join(successful_driver_ids)}"
+            )
+            # 网关驱动 ID 形如 gateway:插件ID:网关名，INFO 只展示网关名。
+            driver_names = ",".join(
+                driver_id.rsplit(":", 1)[-1] if driver_id.startswith("gateway:") else driver_id
+                for driver_id in successful_driver_ids
+            )
+            group_info = message.message_info.group_info
+            user_info = message.message_info.user_info
+            session_name = _chat_manager.get_session_name(message.session_id)
+            if not session_name:
+                session_name = (
+                    group_info.group_name or group_info.group_id
+                    if group_info is not None
+                    else f"{user_info.user_nickname or user_info.user_id}的私聊"
+                )
             logger.info(
-                f"已通过 Platform IO 将消息发往平台 '{route_key.platform}' "
-                f"(drivers: {', '.join(successful_driver_ids)}) "
-                f"message={_build_outbound_log_preview(message)}"
+                f"[{route_key.account_id or ''}:{route_key.platform}:{driver_names}] "
+                f"[{session_name}] {global_config.bot.nickname}: {_build_outbound_log_preview(message)}"
             )
         return message
 
@@ -1136,8 +1174,7 @@ async def _send_to_target_with_message(
         logger.error("[SendService] 发送消息失败")
         return None
     except Exception as exc:
-        logger.error(f"[SendService] 发送消息时出错: {exc}")
-        traceback.print_exc()
+        logger.exception(f"[SendService] 发送消息时出错: {exc}")
         return None
 
 

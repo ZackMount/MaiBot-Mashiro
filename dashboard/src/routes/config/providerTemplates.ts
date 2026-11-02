@@ -5,6 +5,7 @@
  */
 
 import type { ThinkingFormatConfig } from './model/thinkingFormats'
+import type { ModelInfo } from './model/types'
 
 // 模型获取器配置定义
 export interface ModelFetcherConfig {
@@ -19,9 +20,16 @@ export interface ProviderTemplate {
   id: string
   name: string
   base_url: string
+  // 额外匹配的 base_url 正则（可选，用于含账号/地域变量的官方地址；对规范化后的 URL 整体匹配）
+  baseUrlPattern?: RegExp
   client_type: 'openai' | 'openai_responses' | 'gemini'
   allowed_client_types?: Array<'openai' | 'openai_responses' | 'gemini'>
   display_name: string
+  description?: string
+  defaultApiKey?: string
+  // 选择模板后随提供商一起保存的模型配置。
+  models?: Array<Omit<ModelInfo, 'api_provider'>>
+  providerDefaults?: { max_retry: number; timeout: number; retry_interval: number }
   // 模型列表获取配置（可选，未配置则不支持自动获取）
   modelFetcher?: ModelFetcherConfig
   // 思考开关格式元数据（可选，未配置则该提供商不显示思考开关）
@@ -40,6 +48,29 @@ export const PROVIDER_TEMPLATES: ProviderTemplate[] = [
     display_name: 'DeepSeek',
     modelFetcher: { endpoint: '/models', parser: 'openai' },
     // 思考开关由 model.tsx 中 DeepSeek 专用段处理（含 Responses 客户端的 reasoning.effort 与联网搜索）
+  },
+  {
+    id: 'mai_replier',
+    defaultApiKey: "sk-6k9dX9uIRySYQcwZPig8xMgmjLZcU8JWzOyxQMzVnNrXETJ0",
+    name: '麦麦特调回复',
+    base_url: 'https://openzako.ai/v1',
+    client_type: 'openai',
+    display_name: '麦麦特调回复',
+    description: '我们正在做的一个尝试~训练一个开源的适合拟人发言的模型，可以来试试~\n只能用在回复模型哦',
+    modelFetcher: { endpoint: '/models', parser: 'openai' },
+    providerDefaults: { max_retry: 3, timeout: 300, retry_interval: 12 },
+    models: [
+      { model_identifier: 'mai_replier', name: '麦麦特调回复', visual: true },
+      { model_identifier: 'mai_replier_today', name: '麦麦特调回复（今日版）', visual: true },
+    ].map((model) => ({
+      ...model,
+      model_type: 'llm' as const,
+      price_in: 0,
+      price_out: 0,
+      send_temperature: true,
+      force_stream_mode: false,
+      extra_params: {},
+    })),
   },
   {
     id: 'zhipu',
@@ -122,6 +153,8 @@ export const PROVIDER_TEMPLATES: ProviderTemplate[] = [
     id: 'alibaba',
     name: 'Alibaba',
     base_url: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    // 业务空间专属域名 https://{WorkspaceId}.{region}.maas.aliyuncs.com/compatible-mode/v1
+    baseUrlPattern: /^https?:\/\/[a-z0-9-]+\.[a-z0-9-]+\.maas\.aliyuncs\.com\/compatible-mode\/v1$/,
     client_type: 'openai',
     display_name: '阿里云百炼 (Alibaba Qwen)',
     modelFetcher: { endpoint: '/models', parser: 'openai' },
@@ -197,6 +230,14 @@ export const PROVIDER_TEMPLATES: ProviderTemplate[] = [
   },
 
   // 国际提供商
+  {
+    id: 'openrouter',
+    name: 'OpenRouter',
+    base_url: 'https://openrouter.ai/api/v1',
+    client_type: 'openai',
+    display_name: 'OpenRouter',
+    modelFetcher: { endpoint: '/models', parser: 'openai' },
+  },
   {
     id: 'openai',
     name: 'OpenAI',
@@ -304,7 +345,10 @@ export function findTemplateByBaseUrl(baseUrl: string): ProviderTemplate | null 
 
   return (
     PROVIDER_TEMPLATES.find(
-      (template) => template.id !== 'custom' && normalizeUrl(template.base_url) === normalizedUrl
+      (template) =>
+        template.id !== 'custom' &&
+        (normalizeUrl(template.base_url) === normalizedUrl ||
+          (template.baseUrlPattern?.test(normalizedUrl) ?? false))
     ) || null
   )
 }

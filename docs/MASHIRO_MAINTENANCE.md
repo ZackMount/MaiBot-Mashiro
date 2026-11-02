@@ -1,6 +1,6 @@
 # MaiBot Mashiro
 
-This fork maintains a small set of conversation-quality fixes on top of MaiBot. The initial `mashiro` branch starts at upstream tag `1.3.3` (`cb692c92`). The upstream license and attribution are retained.
+This fork maintains a small set of conversation-quality fixes on top of MaiBot. The `mashiro` branch now includes upstream `main` through `c6429547` (1.3.19). Its initial base was tag `1.3.3` (`cb692c92`). The upstream license and attribution are retained.
 
 ## Branches and updates
 
@@ -13,13 +13,13 @@ The server's current local settings are separate from the source repository. API
 
 ## Maintained changes
 
-1. Quote previews explicitly preserve the original author and the boundary between quoted text and the new message, including incoming cached quotes and outgoing messages.
-2. The normal Replyer path uses actual chat records, preserves self-message metadata, and receives original images up to the configured limit. Full Planner analysis is kept for diagnostics instead of becoming the Replyer's script. Use `replyer_retro_prompt = false`.
+1. Outgoing quote previews preserve the original author and the boundary between quoted text and the new message. Incoming quote attribution uses upstream's verified-author, session-scoped lookup implementation.
+2. The normal Replyer path uses actual chat records, preserves self-message metadata, and receives original images up to the configured limit. Full Planner analysis is kept for diagnostics instead of becoming the Replyer's script. Use `debug.replyer_retro_prompt = false`.
 3. Planner tool instructions and Replyer prose instructions are separated. Necessary facts can still be provided through `reply_reference`.
 4. Full timestamps and the actual triggering message, with the gap from the preceding chat message, identify the current turn. Old topics remain available as context and can be explicitly resumed. This is contextual guidance, not a fixed age-based ban on replies.
 5. Responses function definitions explicitly set `strict = false` to preserve optional attachment arguments.
 
-The optional profile pauses automatic expression selection without deleting learned expressions and sets the emotion trait to neutral. Model selection, API keys, voice configuration, vector retrieval and reply frequency remain deployment choices.
+The optional profile pauses automatic expression selection without deleting learned expressions. Upstream removed the old emotion-trait setting; it is no longer part of the profile. Model selection, API keys, voice configuration, vector retrieval and reply frequency remain deployment choices.
 
 ## Upgrade procedure
 
@@ -37,8 +37,8 @@ Resolve conflicts by preserving the behavior described above in the new architec
 Run the focused tests:
 
 ```sh
-uv sync --frozen --group dev
-uv run --frozen pytest -q pytests/mashiro pytests/maisaka/test_planner_messages.py pytests/maisaka/test_context_history.py
+uv sync --group dev
+uv run pytest -q pytests/mashiro pytests/maisaka/test_planner_messages.py pytests/maisaka/test_replyer_history_filter.py pytests/A_memorix_test/test_summary_identity.py
 ```
 
 Also review changed schemas, configuration migrations, plugin compatibility and model request shapes. Textually clean merges can still change behavior. Check a few offline dialogue cases before promoting the integration branch into `mashiro` and deploying that reviewed commit.

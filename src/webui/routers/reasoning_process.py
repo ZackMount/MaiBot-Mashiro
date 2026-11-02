@@ -2,8 +2,9 @@
 
 from html import unescape
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, List, Optional
 from urllib.parse import unquote, urlparse
+import asyncio
 import base64
 import json
 import mimetypes
@@ -13,19 +14,26 @@ import time
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
+from json_repair import repair_json
 from pydantic import BaseModel, Field
 from sqlmodel import Session, col, select
 
+from src.common.paths import get_instance_root
 from src.common.data_models.llm_service_data_models import LLMServiceRequest
 from src.common.database.database import get_db_session
 from src.common.database.database_model import ChatSession, Messages
+from src.common.logger import get_logger
+from src.common.operation_timing import timed_operation
 from src.config.config import config_manager
 from src.llm_models.payload_content.context_item import CONTEXT_ITEM_SCHEMA_VERSION, ContextItem
 from src.llm_models.payload_content.context_protocol import ContextProtocolMode, validate_context_items
-from src.llm_models.request_snapshot import (
+from src.llm_models.payload_content.context_snapshot import (
     deserialize_context_item_snapshot,
-    serialize_generation_attempt,
     serialize_context_item_snapshot,
+)
+from src.llm_models.request_snapshot import (
+    read_request_snapshot,
+    serialize_generation_attempt,
 )
 from src.maisaka.display.prompt_preview_logger import PromptPreviewLogger
 from src.services.llm_service import generate as generate_llm_response
@@ -36,7 +44,7 @@ from src.webui.routers.avatar import build_webui_avatar_url
 
 router = APIRouter(prefix="/reasoning-process", tags=["reasoning-process"], dependencies=[Depends(require_auth)])
 
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
+PROJECT_ROOT = get_instance_root()
 PROMPT_LOG_ROOT = (PROJECT_ROOT / "logs" / "maisaka_prompt").resolve()
 REPLAY_IMAGE_ROOTS = (
     (PROJECT_ROOT / "data" / "images").resolve(),
@@ -47,9 +55,13 @@ REPLAY_IMAGE_ROOTS = (
 ALLOWED_SUFFIXES = {".txt", ".html", ".json"}
 SESSION_CHAT_TYPES = ("group", "private")
 ALL_GROUP_SESSIONS = "__all_group_chats__"
-BEHAVIOR_REFERENCE_MARKER = "[行为表现参考]"
 PROMPT_METADATA_MARKER = "[请求信息]"
 PROMPT_SEPARATOR = "=" * 80
+# 工具推理记录相对发起它的请求最多晚多久（毫秒），以及定位调用 ID 需要读取的文件头长度
+TOOL_CALL_RECORD_WINDOW_MS = 30 * 60 * 1000
+TOOL_CALL_RECORD_HEAD_SIZE = 8192
+# 反查发起调用的记录时需要完整解析 JSON，每个类型最多往前看这么多条
+TOOL_CALL_SOURCE_MAX_CANDIDATES = 12
 PROMPT_METADATA_SCRIPT_PATTERN = re.compile(
     r"<script[^>]*id=[\"']prompt-preview-metadata[\"'][^>]*>(?P<payload>.*?)</script>",
     re.IGNORECASE | re.DOTALL,
@@ -228,6 +240,11 @@ class ReasoningPromptSessionInfo(BaseModel):
     matched_current_account: bool = False
 
 
+class SelectedExpressionPair(BaseModel):
+    situation: str
+    style: str
+
+
 class ReasoningPromptFile(BaseModel):
     """推理过程日志条目。"""
 
@@ -244,10 +261,10 @@ class ReasoningPromptFile(BaseModel):
     html_path: str | None = None
     json_path: str | None = None
     output_preview: str | None = None
+    selected_expressions: Optional[List[SelectedExpressionPair]] = None
     action_preview: str | None = None
     display_title: str | None = None
     related_json_paths: list[str] = Field(default_factory=list)
-    has_behavior_choice_insert: bool = False
     model_name: str | None = None
     duration_ms: float | None = None
     prompt_tokens: int | None = None
@@ -269,6 +286,27 @@ class ReasoningPromptListResponse(BaseModel):
     sessions: list[str] = Field(default_factory=list)
     session_infos: list[ReasoningPromptSessionInfo] = Field(default_factory=list)
     selected_session: str = ""
+
+
+class ReasoningToolCallRecord(BaseModel):
+    """工具调用对应的推理过程记录定位信息。"""
+
+    call_id: str
+    stage: str
+    session: str
+    stem: str
+
+
+class ReasoningToolCallRecordsResponse(BaseModel):
+    """工具调用推理记录查找响应。"""
+
+    records: list[ReasoningToolCallRecord] = Field(default_factory=list)
+
+
+class ReasoningToolCallSourceResponse(BaseModel):
+    """发起某次工具调用的推理记录查找响应。"""
+
+    record: ReasoningToolCallRecord | None = None
 
 
 class ReasoningPromptStagesResponse(BaseModel):
@@ -363,18 +401,19 @@ def _latest_replyer_expressions(session_id: str) -> tuple[list[str], int | None]
 
 @router.get("/active-context", response_model=ChatActiveContextResponse)
 def get_chat_active_context(session_id: str = Query(..., min_length=1)):
-    """读取运行中聊天流保留的回想、黑话，以及可用表达方式。"""
+    """读取运行中聊天流的滚动状态摘要、黑话，以及可用表达方式。"""
 
     from src.chat.heart_flow.heartflow_manager import heartflow_manager
     from src.maisaka.context.messages import ReferenceMessage, ReferenceMessageType
-    from src.maisaka.memory.mid_term import is_mid_term_memory_message
+    from src.maisaka.context.compaction import ContextSummaryMessage
 
     chat_manager = _get_chat_manager()
     if chat_manager.get_existing_session_by_session_id(session_id) is None:
         raise HTTPException(status_code=404, detail="聊天流不存在")
     runtime = heartflow_manager.heartflow_chat_list.get(session_id)
     history = list(runtime._chat_history) if runtime is not None else []
-    memory = [message.visible_text for message in history if is_mid_term_memory_message(message)]
+    summary_history = runtime._focus_group.history if runtime is not None and runtime._focus_group is not None else history
+    memory = [message.processed_plain_text for message in summary_history if isinstance(message, ContextSummaryMessage)]
     jargon_by_name: dict[str, str] = {}
     for message in history:
         if isinstance(message, ReferenceMessage) and message.reference_type == ReferenceMessageType.JARGON:
@@ -809,7 +848,7 @@ def _extract_prompt_metadata_from_html(content: str) -> dict[str, object]:
 
 def _load_prompt_json(file_path: Path) -> dict[str, Any]:
     try:
-        payload = json.loads(file_path.read_text(encoding="utf-8", errors="replace"))
+        payload = read_request_snapshot(file_path)
     except (OSError, TypeError, ValueError, json.JSONDecodeError):
         return {}
     return _normalize_prompt_json_payload(payload) if isinstance(payload, dict) else {}
@@ -955,26 +994,6 @@ def _load_prompt_message_avatar_map(relative_path: str, content: str) -> dict[st
     )
 
 
-def _json_payload_has_behavior_reference(payload: dict[str, Any]) -> bool:
-    serialized_payload = json.dumps(payload, ensure_ascii=False, default=str)
-    return BEHAVIOR_REFERENCE_MARKER in serialized_payload
-
-
-def _prompt_record_has_behavior_reference(
-    *,
-    stage_name: str,
-    json_payload: dict[str, Any] | None,
-    json_file_path: Path | None,
-) -> bool:
-    if stage_name != "planner":
-        return False
-
-    if json_payload is None and json_file_path is not None:
-        json_payload = _load_prompt_json(json_file_path)
-
-    return json_payload is not None and _json_payload_has_behavior_reference(json_payload)
-
-
 def _extract_prompt_metadata_from_json_payload(payload: dict[str, Any]) -> dict[str, object]:
     raw_metadata = payload.get("metadata")
     metadata = _normalize_prompt_metadata(raw_metadata if isinstance(raw_metadata, dict) else {})
@@ -1098,8 +1117,10 @@ def _resolve_replay_image_path(raw_path: str) -> Path:
     resolved_path = candidate.resolve()
     if not _is_path_in_roots(resolved_path, REPLAY_IMAGE_ROOTS):
         raise ValueError(f"图片引用路径不在允许目录内: {normalized_path}")
+    if not resolved_path.exists():
+        raise FileNotFoundError(f"图片引用文件不存在: {normalized_path}")
     if not resolved_path.is_file():
-        raise ValueError(f"图片引用文件不存在: {normalized_path}")
+        raise ValueError(f"图片引用不是文件: {normalized_path}")
     return resolved_path
 
 
@@ -1187,7 +1208,11 @@ def _rehydrate_replay_content(value: Any) -> Any:
     if not isinstance(value, dict):
         return value
 
-    image_part = _rehydrate_replay_image_part(value)
+    try:
+        image_part = _rehydrate_replay_image_part(value)
+    except FileNotFoundError:
+        # 导入记录可能不包含原图；保留图片位置，不阻断其余上下文的重放。
+        return {"type": "text", "text": "[图片]"}
     if image_part is not None:
         return image_part
 
@@ -1245,7 +1270,7 @@ def _extract_prompt_metadata(file_path: Path) -> dict[str, object]:
     suffix = file_path.suffix.lower()
     if suffix == ".json":
         try:
-            raw_payload = json.loads(content)
+            raw_payload = read_request_snapshot(file_path)
         except (TypeError, ValueError, json.JSONDecodeError):
             return {}
         return _extract_prompt_metadata_from_json_payload(
@@ -1362,6 +1387,49 @@ def _extract_output_text_from_json_payload(payload: dict[str, Any]) -> str | Non
 
 def _extract_output_preview_from_json(file_path: Path, max_chars: int = 160) -> str | None:
     return _extract_output_preview_from_json_payload(_load_prompt_json(file_path), max_chars=max_chars)
+
+
+def _extract_selected_expression_pairs(payload: Dict[str, Any]) -> Optional[List[SelectedExpressionPair]]:
+    """使用当次请求的候选快照还原表达对，避免查询当前表达库导致历史内容漂移。"""
+    output = _extract_output_text_from_json_payload(payload)
+    if not output:
+        return None
+    try:
+        result = json.loads(repair_json(output))
+    except (TypeError, ValueError):
+        return None
+    selected_ids = result.get("selected_ids") if isinstance(result, dict) else None
+    if not isinstance(selected_ids, list):
+        return None
+
+    candidates: Dict[int, SelectedExpressionPair] = {}
+    for item in payload.get("request_items", []):
+        if not isinstance(item, dict) or item.get("item_type") != "SystemMessageItem":
+            continue
+        text = "\n".join(
+            part["text"] for part in item.get("parts", [])
+            if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str)
+        )
+        # 候选内容可以跨行；只在下一条候选开始时结束，不从历史聊天中匹配相似文本。
+        for match in re.finditer(
+            r"^(\d+): 情景=(.*?) \| 风格=(.*?)(?=^\d+: 情景=|\Z)",
+            text, re.MULTILINE | re.DOTALL,
+        ):
+            candidates[int(match[1])] = SelectedExpressionPair(situation=match[2].strip(), style=match[3].strip())
+
+    pairs: List[SelectedExpressionPair] = []
+    seen_ids = set()
+    for selected_id in selected_ids:
+        if type(selected_id) is not int or selected_id not in candidates:
+            continue  # 与选择器一致，忽略模型返回的无效候选编号。
+        if selected_id not in seen_ids:
+            seen_ids.add(selected_id)
+            pairs.append(candidates[selected_id])
+        if len(pairs) >= 5:
+            break
+    if selected_ids and not candidates:
+        return None
+    return pairs
 
 
 def _extract_output_preview_from_json_payload(payload: dict[str, Any], max_chars: int = 160) -> str | None:
@@ -1824,7 +1892,7 @@ def _hydrate_prompt_file_record(
     hydrated_record = dict(record)
     stage_name = str(hydrated_record["stage"])
     should_extract_action_preview = include_action_preview and stage_name in {"jargon_learning_update", "planner"}
-    should_extract_output_preview = include_output_preview and stage_name == "replyer"
+    should_extract_output_preview = include_output_preview and stage_name in {"replyer", "expression_selector"}
     should_extract_llm_error_preview = stage_name == "llm_error"
     json_payload: dict[str, Any] | None = None
 
@@ -1840,6 +1908,13 @@ def _hydrate_prompt_file_record(
             _merge_prompt_metadata(hydrated_record, _extract_prompt_metadata_from_json_payload(json_payload))
             if should_extract_llm_error_preview:
                 hydrated_record["display_title"] = _extract_llm_error_display_title(json_payload)
+            elif stage_name == "expression_selector":
+                pairs = _extract_selected_expression_pairs(json_payload)
+                hydrated_record["selected_expressions"] = pairs
+                hydrated_record["output_preview"] = (
+                    "；".join(f"{pair.situation} → {pair.style}" for pair in pairs)
+                    if pairs else "未选择表达" if pairs == [] else "无法从记录还原已选表达"
+                )
             elif stage_name == "replyer" and (include_previews or should_extract_output_preview):
                 hydrated_record["output_preview"] = _extract_output_preview_from_json_payload(json_payload)
             elif stage_name == "planner" or _is_jargon_learning_update_preview_payload(json_payload):
@@ -1863,11 +1938,6 @@ def _hydrate_prompt_file_record(
         metadata_missing = not hydrated_record.get("model_name") or hydrated_record.get("duration_ms") is None
 
     html_file_path = _resolve_record_file_path(hydrated_record, "html_path", {".html"})
-    hydrated_record["has_behavior_choice_insert"] = _prompt_record_has_behavior_reference(
-        stage_name=stage_name,
-        json_payload=json_payload,
-        json_file_path=json_file_path,
-    )
     if html_file_path is not None and metadata_missing:
         _merge_prompt_metadata(hydrated_record, _extract_prompt_metadata(html_file_path))
 
@@ -1973,6 +2043,7 @@ def clear_reasoning_prompt_stage(stage: str):
 
 
 @router.get("/files", response_model=ReasoningPromptListResponse)
+@timed_operation(get_logger("reasoning_process"), "preview.list_history", quiet=True)
 def list_reasoning_prompt_files(
     stage: str = Query("planner"),
     session: str = Query("auto"),
@@ -2063,6 +2134,139 @@ def list_reasoning_prompt_files(
     )
 
 
+def _find_tool_call_record_stem(session_dir: Path, source_timestamp: int, pending_call_ids: set[str]) -> dict[str, str]:
+    """在某个类型的会话目录里，按调用 ID 查找工具自己的推理记录。"""
+
+    # 工具是在发起它的那次请求结束之后才执行的，记录文件名（毫秒时间戳）一定更晚；只看时间窗口内的文件
+    candidate_files = sorted(
+        (
+            file_path
+            for file_path in session_dir.glob("*.json")
+            if file_path.stem.isdigit()
+            and source_timestamp <= int(file_path.stem) <= source_timestamp + TOOL_CALL_RECORD_WINDOW_MS
+        ),
+        key=lambda file_path: int(file_path.stem),
+    )
+
+    found: dict[str, str] = {}
+    for file_path in candidate_files:
+        # 调用 ID 写在 JSON 开头的 request.selection_reason 里，读文件头即可
+        with file_path.open("r", encoding="utf-8", errors="replace") as file:
+            head = file.read(TOOL_CALL_RECORD_HEAD_SIZE)
+        for call_id in pending_call_ids - found.keys():
+            if re.search(rf"ID[:：]\s*{re.escape(call_id)}(?![\w-])", head):
+                found[call_id] = file_path.stem
+        if len(found) == len(pending_call_ids):
+            break
+    return found
+
+
+@router.get("/tool-call-records", response_model=ReasoningToolCallRecordsResponse)
+def find_reasoning_tool_call_records(
+    session: str = Query(..., min_length=1),
+    source_stage: str = Query("planner"),
+    source_stem: str = Query(..., min_length=1),
+    call_id: tuple[str, ...] = Query(()),
+):
+    """查找一次请求输出的工具调用里，哪些工具（如 reply）留有自己的推理过程记录。"""
+
+    if not _is_safe_name(session):
+        raise HTTPException(status_code=400, detail="会话名称不合法")
+    normalized_source_stage = _resolve_stage_name(source_stage)
+    pending_call_ids = {item.strip() for item in call_id if item.strip()}
+    if not pending_call_ids or not source_stem.isdigit():
+        return ReasoningToolCallRecordsResponse()
+
+    records: list[ReasoningToolCallRecord] = []
+    for stage_name in _list_stage_names():
+        if stage_name == normalized_source_stage or not pending_call_ids:
+            continue
+        session_dir = PROMPT_LOG_ROOT / stage_name / session
+        if not session_dir.is_dir():
+            continue
+        found = _find_tool_call_record_stem(session_dir, int(source_stem), pending_call_ids)
+        for found_call_id, stem in found.items():
+            records.append(ReasoningToolCallRecord(call_id=found_call_id, stage=stage_name, session=session, stem=stem))
+        pending_call_ids -= found.keys()
+
+    return ReasoningToolCallRecordsResponse(records=records)
+
+
+def _payload_outputs_tool_call(payload: dict[str, Any], call_id: str) -> bool:
+    """判断一条推理记录的输出里是否发起了指定的工具调用。"""
+
+    output_items = payload.get("output_items")
+    if not isinstance(output_items, list):
+        return False
+    return any(
+        isinstance(item, dict)
+        and item.get("item_type") == "FunctionCallItem"
+        and isinstance(item.get("tool_call"), dict)
+        and str(item["tool_call"].get("call_id") or "") == call_id
+        for item in output_items
+    )
+
+
+def _find_tool_call_source_stem(session_dir: Path, tool_timestamp: int, call_id: str) -> str | None:
+    """在某个类型的会话目录里，查找输出了指定工具调用的那条推理记录。"""
+
+    # 发起调用的请求一定早于工具自己的记录；从最近的往前找
+    candidate_files = sorted(
+        (
+            file_path
+            for file_path in session_dir.glob("*.json")
+            if file_path.stem.isdigit()
+            and tool_timestamp - TOOL_CALL_RECORD_WINDOW_MS <= int(file_path.stem) <= tool_timestamp
+        ),
+        key=lambda file_path: int(file_path.stem),
+        reverse=True,
+    )
+
+    for file_path in candidate_files[:TOOL_CALL_SOURCE_MAX_CANDIDATES]:
+        # 调用 ID 也会出现在后续请求的历史上下文里，必须确认它在这条记录的输出中
+        if _payload_outputs_tool_call(_load_prompt_json(file_path), call_id):
+            return file_path.stem
+    return None
+
+
+@router.get("/tool-call-source", response_model=ReasoningToolCallSourceResponse)
+def find_reasoning_tool_call_source(
+    session: str = Query(..., min_length=1),
+    stage: str = Query(..., min_length=1),
+    stem: str = Query(..., min_length=1),
+    call_id: str = Query(..., min_length=1),
+):
+    """从工具自己的推理记录（如回复器）反查发起这次调用的推理记录（通常是规划器）。"""
+
+    if not _is_safe_name(session):
+        raise HTTPException(status_code=400, detail="会话名称不合法")
+    tool_stage = _resolve_stage_name(stage)
+    normalized_call_id = call_id.strip()
+    if not normalized_call_id or not stem.isdigit():
+        return ReasoningToolCallSourceResponse()
+
+    # 绝大多数工具调用由规划器发起，优先查它
+    stage_names = sorted(_list_stage_names(), key=lambda name: name != "planner")
+    for stage_name in stage_names:
+        if stage_name == tool_stage:
+            continue
+        session_dir = PROMPT_LOG_ROOT / stage_name / session
+        if not session_dir.is_dir():
+            continue
+        source_stem = _find_tool_call_source_stem(session_dir, int(stem), normalized_call_id)
+        if source_stem:
+            return ReasoningToolCallSourceResponse(
+                record=ReasoningToolCallRecord(
+                    call_id=normalized_call_id,
+                    stage=stage_name,
+                    session=session,
+                    stem=source_stem,
+                )
+            )
+
+    return ReasoningToolCallSourceResponse()
+
+
 @router.get("/file", response_model=ReasoningPromptContentResponse)
 def get_reasoning_prompt_file(path: str = Query(...)):
     """读取推理过程 txt/json 日志内容。"""
@@ -2072,12 +2276,14 @@ def get_reasoning_prompt_file(path: str = Query(...)):
     content = file_path.read_text(encoding="utf-8", errors="replace")
     if file_path.suffix.lower() == ".json":
         try:
-            raw_payload = json.loads(content)
+            raw_payload = read_request_snapshot(file_path)
         except (TypeError, ValueError, json.JSONDecodeError):
             raw_payload = {}
         payload = _normalize_prompt_json_payload(raw_payload) if isinstance(raw_payload, dict) else {}
         metadata = _extract_prompt_metadata_from_json_payload(payload)
-        if isinstance(raw_payload, dict) and _is_jargon_learning_update_payload(raw_payload):
+        if isinstance(raw_payload, dict) and (
+            _is_jargon_learning_update_payload(raw_payload) or file_path.with_suffix(".events.jsonl").exists()
+        ):
             content = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
         message_avatars = _load_prompt_message_avatar_map(path, content)
     else:
@@ -2106,7 +2312,7 @@ def get_reasoning_prompt_image(path: str = Query(...)):
 
     try:
         image_path = _resolve_replay_image_path(path)
-    except ValueError as exc:
+    except (ValueError, FileNotFoundError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     media_type = mimetypes.guess_type(image_path.name)[0] or "application/octet-stream"
     return FileResponse(image_path, media_type=media_type)
@@ -2125,7 +2331,7 @@ async def replay_reasoning_prompt(request: ReasoningReplayRequest):
     tool_definitions = request.tool_definitions
     if tool_definitions is None and request.source_path:
         source_path = _resolve_prompt_log_path(request.source_path, {".json"})
-        source_payload = _load_prompt_json(source_path)
+        source_payload = await asyncio.to_thread(_load_prompt_json, source_path)
         raw_tool_definitions = source_payload.get("tool_definitions")
         if isinstance(raw_tool_definitions, list):
             tool_definitions = [item for item in raw_tool_definitions if isinstance(item, dict)]

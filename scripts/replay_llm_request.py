@@ -22,11 +22,12 @@ from src.llm_models.model_client.base_client import (
     client_registry,
 )
 from src.llm_models.payload_content.context_item import get_item_text
+from src.llm_models.payload_content.context_snapshot import deserialize_context_items_snapshot
 from src.llm_models.request_snapshot import (
-    deserialize_context_items_snapshot,
     deserialize_model_info_snapshot,
     deserialize_persisted_context_items_snapshot,
     deserialize_response_format_snapshot,
+    read_request_snapshot,
     deserialize_structured_context_items_snapshot,
     deserialize_tool_options_snapshot,
     read_structured_audio_base64,
@@ -35,7 +36,7 @@ from src.llm_models.request_snapshot import (
 
 def _load_snapshot(snapshot_path: Path) -> dict[str, Any]:
     """加载请求快照。"""
-    return json.loads(snapshot_path.read_text(encoding="utf-8"))
+    return read_request_snapshot(snapshot_path)
 
 
 def _resolve_api_provider(provider_name: str):
@@ -57,6 +58,7 @@ def _build_response_request(snapshot: dict[str, Any]) -> ResponseRequest:
         response_format=deserialize_response_format_snapshot(snapshot.get("response_format")),
         temperature=snapshot.get("temperature"),
         tool_options=deserialize_tool_options_snapshot(snapshot.get("tool_options")),
+        tool_choice=snapshot.get("tool_choice"),
     )
 
 
@@ -96,6 +98,7 @@ def _build_unified_response_request(snapshot: dict[str, Any]) -> ResponseRequest
         response_format=deserialize_response_format_snapshot(request_parameters.get("response_format")),
         temperature=request_parameters.get("temperature"),
         tool_options=deserialize_tool_options_snapshot(snapshot.get("tool_definitions")),
+        tool_choice=request_parameters.get("tool_choice"),
     )
 
 

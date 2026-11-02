@@ -172,12 +172,12 @@ export type DashboardStyleConfig = {
   futureRetro: FutureRetroStyleConfig
 }
 
-export const DEFAULT_DASHBOARD_STYLE: DashboardStyle = 'future-retro'
+export const DEFAULT_DASHBOARD_STYLE: DashboardStyle = 'millennium'
 
 export const DEFAULT_FUTURE_RETRO_STYLE_CONFIG: FutureRetroStyleConfig = {
-  paperWarmth: 100,
-  textureStyle: 'fine',
-  textureIntensity: 55,
+  paperWarmth: 89,
+  textureStyle: 'coarse',
+  textureIntensity: 64,
   panelDepth: 100,
 }
 
@@ -564,7 +564,7 @@ const millenniumBaseVisual = {
 } satisfies Partial<VisualTokens>
 
 const millenniumBaseLayout = {
-  'sidebar-logo-height': '4.375rem',
+  'sidebar-logo-height': '52px',
   'sidebar-nav-item-gap': '0.625rem',
   'sidebar-nav-item-height': '2.875rem',
   'sidebar-nav-item-collapsed-width': '2.875rem',

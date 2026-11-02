@@ -1,10 +1,12 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate, useSearch } from '@tanstack/react-router'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
+import { Progress } from '@/components/ui/progress'
 import { ScrollArea } from '@/components/ui/scroll-area'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { ThinkingIllustration } from '@/components/ui/thinking-illustration'
 import {
   ArrowLeft,
@@ -22,10 +24,10 @@ import {
   Tag,
   GitBranch,
   Info,
-  FileText,
 } from 'lucide-react'
 import { useToast } from '@/hooks/use-toast'
-import { backendApi } from '@/lib/http'
+import { pluginProgressClient } from '@/lib/plugin-progress-client'
+import { buildLocalPluginInfo } from '@/lib/plugin-info'
 import type { PluginInfo } from '@/types/plugin'
 import {
   checkGitStatus,
@@ -38,11 +40,13 @@ import {
   fetchPluginList,
   getCachedPluginList,
   fetchPluginDetail,
+  fetchPluginDocument,
   getInstalledPluginVersion,
   getInstalledPlugins,
   type InstalledPlugin,
   type GitStatus,
   type MaimaiVersion,
+  type PluginLoadProgress,
 } from '@/lib/plugin-api'
 import { describeRejectedReleaseError, shortenReleaseReasons } from '@/lib/plugin-api/release-reasons'
 import { MarkdownRenderer } from '@/components/markdown-renderer'
@@ -51,247 +55,37 @@ import { recordPluginDownload } from '@/lib/plugin-stats'
 import { PluginIcon } from './plugins/PluginIcon'
 import { getPluginTypeLabel } from './plugins/types'
 
-function isAbortError(error: unknown): boolean {
-  if (!(error instanceof Error)) {
-    return false
-  }
-
-  const cause = error.cause
-  return (
-    error.name === 'AbortError'
-    || (cause instanceof Error && cause.name === 'AbortError')
-  )
-}
-
-function buildLocalPluginInfo(installedPlugin: InstalledPlugin): PluginInfo {
-  const urls = installedPlugin.manifest.urls as PluginInfo['manifest']['urls'] | undefined
-
-  return {
-    id: installedPlugin.id,
-    manifest: {
-      manifest_version: installedPlugin.manifest.manifest_version || 1,
-      id: installedPlugin.manifest.id || installedPlugin.id,
-      name: installedPlugin.manifest.name,
-      version: installedPlugin.manifest.version,
-      description: installedPlugin.manifest.description || '',
-      author: installedPlugin.manifest.author,
-      license: installedPlugin.manifest.license || 'Unknown',
-      host_application: installedPlugin.manifest.host_application,
-      homepage_url: installedPlugin.manifest.homepage_url || urls?.homepage,
-      repository_url: installedPlugin.manifest.repository_url || urls?.repository,
-      urls,
-      keywords: installedPlugin.manifest.keywords || [],
-      plugin_type: installedPlugin.manifest.plugin_type || 'extension',
-      display: installedPlugin.manifest.display,
-      changelog: installedPlugin.manifest.changelog,
-      default_locale: (installedPlugin.manifest.default_locale as string) || 'zh-CN',
-      locales_path: installedPlugin.manifest.locales_path as string | undefined,
-    },
-    downloads: 0,
-    rating: 0,
-    review_count: 0,
-    installed: true,
-    installed_version: installedPlugin.manifest.version,
-    published_at: '',
-    updated_at: '',
-    changelog: installedPlugin.changelog ?? undefined,
-    source: 'local',
-  }
-}
-
-async function loadPluginReadme(
-  plugin: PluginInfo,
-  isInstalled: boolean,
-  signal: AbortSignal,
-  ref: string = 'main'
-): Promise<string> {
-  const repositoryUrl = plugin.manifest.repository_url
-  if (!repositoryUrl) {
-    return ''
-  }
-
-  // 如果插件已安装，优先尝试从本地读取 README。
-  if (isInstalled) {
-    try {
-      const localResult = await backendApi.get<{ success: boolean; data?: string }>(
-        `/api/webui/plugins/local-readme/${plugin.id}`,
-        { signal }
-      )
-
-      if (localResult.success && localResult.data) {
-        return localResult.data
-      }
-    } catch (error) {
-      if (isAbortError(error)) {
-        throw error
-      }
-      // 本地未读到时继续尝试远程 README。
-    }
-  }
-
-  // 从 repository_url 解析仓库信息。
-  const match = repositoryUrl.match(/github\.com\/([^/]+)\/([^/\s]+)/)
-  if (!match) {
-    return '无法解析仓库地址'
-  }
-
-  const [, owner, repo] = match
-  const cleanRepo = repo.replace(/\.git$/, '')
-
-  const result = await backendApi.post<{ success: boolean; data?: string }>(
-    '/api/webui/plugins/fetch-raw',
-    {
-      body: {
-        owner,
-        repo: cleanRepo,
-        branch: ref,
-        file_path: 'README.md',
-      },
-      errorMessage: '获取 README 失败',
-      signal,
-    }
-  )
-
-  if (result.success && result.data) {
-    return result.data
-  }
-
-  return '该插件暂无 README 文档'
-}
-
-function getInlineChangelog(changelog: string | undefined): string | null {
-  if (!changelog?.trim()) {
-    return null
-  }
-
-  const normalizedChangelog = changelog.trim()
-  if (
-    normalizedChangelog.includes('\n')
-    || normalizedChangelog.startsWith('#')
-    || normalizedChangelog.startsWith('- ')
-  ) {
-    return normalizedChangelog
-  }
-
-  return null
-}
-
-async function fetchUndeclaredRepositoryChangelog(
-  owner: string,
-  repo: string,
-  signal: AbortSignal
-): Promise<string> {
-  const response = await fetch(
-    `https://raw.githubusercontent.com/${owner}/${repo}/main/CHANGELOG.md`,
-    { signal }
-  )
-
-  if (!response.ok) {
-    return ''
-  }
-
-  return response.text()
-}
-
-async function loadPluginChangelog(
-  plugin: PluginInfo,
-  isInstalled: boolean,
-  signal: AbortSignal
-): Promise<string> {
-  const inlineChangelog = getInlineChangelog(plugin.changelog)
-  if (inlineChangelog) {
-    return inlineChangelog
-  }
-
-  if (isInstalled) {
-    try {
-      const localResult = await backendApi.get<{ success: boolean; data?: string }>(
-        `/api/webui/plugins/local-changelog/${plugin.id}`,
-        { signal }
-      )
-
-      if (localResult.success && localResult.data) {
-        return localResult.data
-      }
-    } catch (error) {
-      if (isAbortError(error)) {
-        throw error
-      }
-    }
-  }
-
-  const manifestChangelog = plugin.manifest.changelog?.trim() || plugin.changelog?.trim()
-  if (manifestChangelog && /^https?:\/\//.test(manifestChangelog)) {
-    const result = await backendApi.post<{ success: boolean; data?: string }>(
-      '/api/webui/plugins/fetch-raw',
-      {
-        body: {
-          owner: 'custom',
-          repo: 'custom',
-          branch: 'main',
-          file_path: 'CHANGELOG.md',
-          custom_url: manifestChangelog,
-        },
-        errorMessage: '获取更新日志失败',
-        signal,
-      }
-    )
-
-    return result.success && result.data ? result.data : ''
-  }
-
-  const repositoryUrl = plugin.manifest.repository_url
-  if (!repositoryUrl || !manifestChangelog) {
-    return ''
-  }
-
-  const match = repositoryUrl.match(/github\.com\/([^/]+)\/([^/\s]+)/)
-  if (!match) {
-    return ''
-  }
-
-  const [, owner, repo] = match
-  const cleanRepo = repo.replace(/\.git$/, '')
-  if (!manifestChangelog) {
-    try {
-      return await fetchUndeclaredRepositoryChangelog(owner, cleanRepo, signal)
-    } catch (error) {
-      if (isAbortError(error)) {
-        throw error
-      }
-      return ''
-    }
-  }
-
-  const result = await backendApi.post<{ success: boolean; data?: string }>(
-    '/api/webui/plugins/fetch-raw',
-    {
-      body: {
-        owner,
-        repo: cleanRepo,
-        branch: 'main',
-        file_path: manifestChangelog,
-      },
-      errorMessage: '获取更新日志失败',
-      signal,
-    }
-  )
-
-  return result.success && result.data ? result.data : ''
+function formatPluginUpdateDate(timestamp?: string): string {
+  const date = timestamp ? new Date(timestamp) : null
+  if (!date || !Number.isFinite(date.getTime())) return '时间未知'
+  return date.toLocaleDateString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit' })
 }
 
 interface PluginDetailPageProps {
   embedded?: boolean
-  mode?: 'page' | 'dialog'
+  mode?: 'page' | 'dialog' | 'panel'
   onClose?: () => void
+  onInstalledPluginsChange?: (installed: InstalledPlugin[]) => void
   pluginId?: string
+  /** 进入动画期间推迟文档请求与渲染，避免 Markdown 解析抢占滑动帧。 */
+  deferContent?: boolean
+  initialPlugin?: PluginInfo
+  initialRuntime?: {
+    gitStatus: GitStatus
+    maimaiVersion: MaimaiVersion
+    installedPlugins: InstalledPlugin[]
+  }
 }
 
 export function PluginDetailPage({
   embedded = false,
   mode = 'page',
   onClose,
+  onInstalledPluginsChange,
   pluginId: pluginIdProp,
+  deferContent = false,
+  initialPlugin,
+  initialRuntime,
 }: PluginDetailPageProps) {
   const navigate = useNavigate()
   const pluginsRoute: '/plugins' | '/plugins/embed' = embedded ? '/plugins/embed' : '/plugins'
@@ -299,16 +93,66 @@ export function PluginDetailPage({
   const { toast } = useToast()
   const queryClient = useQueryClient()
   const pluginId = pluginIdProp ?? search.pluginId
-  const [selection, setSelection] = useState<{ pluginId?: string; version: string; pinned: boolean } | null>(null)
+  const [selection, setSelection] = useState<{ pluginId?: string; version: string } | null>(null)
+  const [operationProgress, setOperationProgress] = useState<PluginLoadProgress | null>(null)
+  const [progressConnectionError, setProgressConnectionError] = useState<string | null>(null)
+
+  // 与插件市场共用进度通道，只接收本详情页发起的同一插件、同一种操作。
+  useEffect(() => {
+    let disposed = false
+    let unsubscribe: (() => Promise<void>) | undefined
+    void pluginProgressClient.subscribe((progress) => {
+      if (disposed) return
+      setOperationProgress((current) => (
+        current?.stage === 'loading'
+        && current.plugin_id === progress.plugin_id
+        && current.operation === progress.operation
+          ? progress
+          : current
+      ))
+    }).then((cleanup) => {
+      if (disposed) void cleanup()
+      else unsubscribe = cleanup
+    }).catch((error: unknown) => {
+      if (!disposed) setProgressConnectionError(
+        error instanceof Error ? error.message : '无法连接插件进度通道'
+      )
+    })
+    return () => {
+      disposed = true
+      void unsubscribe?.()
+    }
+  }, [])
+
+  const beginOperation = (target: PluginInfo, operation: 'install' | 'update' | 'uninstall') => {
+    const label = { install: '安装', update: '更新', uninstall: '卸载' }[operation]
+    setOperationProgress({
+      operation, plugin_id: target.id, stage: 'loading', progress: 0,
+      message: `正在准备${label} ${target.manifest.name}`,
+      total_plugins: 1, loaded_plugins: 0,
+    })
+  }
+  const finishOperation = (target: PluginInfo, operation: 'install' | 'update' | 'uninstall', error?: unknown) => {
+    const label = { install: '安装', update: '更新', uninstall: '卸载' }[operation]
+    setOperationProgress((current) => {
+      if (!current || current.plugin_id !== target.id || current.operation !== operation) return current
+      return error === undefined
+        ? { ...current, stage: 'success', progress: 100, loaded_plugins: 1, message: `${label}完成`, error: undefined }
+        : { ...current, stage: 'error', message: `${label}失败`, error: error instanceof Error ? error.message : String(error) }
+    })
+  }
   const isDialog = mode === 'dialog'
-  const containerClassName = isDialog
-    ? 'space-y-4 sm:space-y-5 p-4 sm:p-5'
-    : 'space-y-4 sm:space-y-6 p-4 sm:p-6'
-  const detailScrollClassName = isDialog
-    ? 'h-[min(68vh,720px)]'
-    : 'h-[calc(100vh-200px)] sm:h-[calc(100vh-220px)]'
-  // 由外层详情滚动容器统一滚动，避免 README 内层固定高度造成嵌套滚动和内容截断。
-  const readmeScrollClassName = 'pr-4'
+  const isPanel = mode === 'panel'
+  const containerClassName = isPanel
+    ? 'flex h-full min-h-0 flex-col gap-4 p-3 sm:p-4 max-lg:h-auto'
+    : isDialog
+      ? 'space-y-4 sm:space-y-5 p-4 sm:p-5'
+      : 'space-y-4 sm:space-y-6 p-4 sm:p-6'
+  const detailScrollClassName = isPanel
+    ? 'min-h-0 flex-1 max-lg:flex-none max-lg:overflow-visible max-lg:[&>[data-dashboard-scrollbar]]:hidden'
+    : isDialog
+      ? 'h-[min(68vh,720px)]'
+      : 'h-[calc(100vh-200px)] sm:h-[calc(100vh-220px)]'
   const handleBack = () => {
     if (onClose) {
       onClose()
@@ -322,16 +166,18 @@ export function PluginDetailPage({
     queryKey: ['plugin-detail', pluginId],
     enabled: !!pluginId,
     staleTime: 5 * 60 * 1000,
+    // 市场已有的元数据先用于首屏；完整详情仍独立请求并暴露错误。
+    placeholderData: initialPlugin?.id === pluginId ? initialPlugin : undefined,
     queryFn: async () => {
       // 从兼容列表进入详情时直接获取该插件，避免先补下载全部插件列表。
-      const cachedPlugin = getCachedPluginList(true)?.find(
+      const cachedPlugin = initialPlugin?.id === pluginId ? initialPlugin : getCachedPluginList(true)?.find(
         (p) => p.id === pluginId || p.marketplace_id === pluginId
       )
-      if (cachedPlugin?.market_data_source === 'service') return fetchPluginDetail(cachedPlugin)
+      if (cachedPlugin) return fetchPluginDetail(cachedPlugin)
       const list = await fetchPluginList()
       const foundPlugin = list.find((p) => p.id === pluginId || p.marketplace_id === pluginId)
       if (foundPlugin) {
-        return foundPlugin.market_data_source === 'service' ? fetchPluginDetail(foundPlugin) : foundPlugin
+        return fetchPluginDetail(foundPlugin)
       }
 
       const installed = await getInstalledPlugins()
@@ -346,32 +192,51 @@ export function PluginDetailPage({
   const plugin = pluginQuery.data ?? null
   const versionSelection = selection?.pluginId === pluginId ? selection : null
   const releaseCatalog = plugin?.releases
+  // 最新更新时间取全部发布版本中的最大日期，不随安装版本选择变化。
+  const pluginUpdateTimestamps = [
+    plugin?.updated_at,
+    ...(releaseCatalog?.versions.map((release) => release.published_at) ?? []),
+  ]
+    .filter((timestamp): timestamp is string => Boolean(timestamp))
+    .map((timestamp) => Date.parse(timestamp))
+    .filter(Number.isFinite)
+  const latestPluginUpdate = pluginUpdateTimestamps.length > 0
+    ? new Date(Math.max(...pluginUpdateTimestamps)).toISOString()
+    : undefined
   const selectedRelease = releaseCatalog?.versions.find(
     (release) => release.version === (versionSelection?.version || releaseCatalog.recommended_version)
   )
   // 缺少插件 ID 时沿用原文案；其余加载失败由 query 的 error 呈现
-  const loading = pluginQuery.isPending && !!pluginId
-  const error = !pluginId
+  const pluginError = !pluginId
     ? '缺少插件 ID'
     : pluginQuery.isError
       ? (pluginQuery.error instanceof Error ? pluginQuery.error.message : '加载失败')
       : null
 
   // 运行时信息（Git 状态、麦麦版本、已安装列表）并行加载；
-  // 这些信息原本失败时静默降级（不打断页面），故用 data ?? 默认值，不强制报错
+  // 安装状态必须加载成功才展示操作入口，避免查询失败被误判为未安装。
   const [gitStatusQuery, maimaiVersionQuery, installedPluginsQuery] = useQueries({
     queries: [
       {
         queryKey: ['plugin-git-status'],
         queryFn: () => checkGitStatus(),
+        initialData: initialRuntime?.gitStatus,
+        initialDataUpdatedAt: 0,
+        staleTime: 30_000,
       },
       {
         queryKey: ['plugin-maimai-version'],
         queryFn: () => getMaimaiVersion(),
+        initialData: initialRuntime?.maimaiVersion,
+        initialDataUpdatedAt: 0,
+        staleTime: 30_000,
       },
       {
         queryKey: ['plugin-installed-list'],
         queryFn: () => getInstalledPlugins({ forceRefresh: true }),
+        initialData: initialRuntime?.installedPlugins,
+        initialDataUpdatedAt: 0,
+        staleTime: 30_000,
       },
     ],
   })
@@ -379,46 +244,50 @@ export function PluginDetailPage({
   const gitStatus: GitStatus | null = gitStatusQuery.data ?? null
   const maimaiVersion: MaimaiVersion | null = maimaiVersionQuery.data ?? null
   const installedPlugins = installedPluginsQuery.data ?? []
+  const loading = !!pluginId && !pluginError && (pluginQuery.isPending || installedPluginsQuery.isPending)
+  const error = pluginError || (installedPluginsQuery.isError ? installedPluginsQuery.error.message : null)
 
   // 由已安装列表派生安装状态与已安装版本（纯函数，不再用本地 state）
   const isInstalled = plugin ? checkPluginInstalled(plugin.id, installedPlugins) : false
   const installedVersion = plugin ? getInstalledPluginVersion(plugin.id, installedPlugins) : undefined
-  const installedRelease = installedPlugins.find((item) => item.id === plugin?.id)?.release
   const releaseRequest = releaseCatalog?.mode === 'releases'
-    ? { version: versionSelection?.version || 'latest', pinned: versionSelection?.pinned ?? installedRelease?.pinned ?? false }
+    ? { version: versionSelection?.version || 'latest' }
     : plugin?.source === 'local' ? null : undefined
 
   const readmeQuery = useQuery({
     queryKey: ['plugin-readme', plugin?.id, isInstalled, selectedRelease?.commit],
-    enabled: !!plugin && !installedPluginsQuery.isPending,
+    enabled: !!plugin && !deferContent && !pluginQuery.isPlaceholderData && installedPluginsQuery.isSuccess,
     staleTime: 5 * 60 * 1000,
-    queryFn: ({ signal }) => loadPluginReadme(
-      plugin!, isInstalled && (!selectedRelease || selectedRelease.version === installedVersion), signal, selectedRelease?.commit
-    ),
+    queryFn: ({ signal }) => fetchPluginDocument(plugin!.id, 'readme', {
+      preferLocal: isInstalled && (!selectedRelease || selectedRelease.version === installedVersion),
+      signal, branch: selectedRelease?.commit,
+    }),
   })
   const readme = readmeQuery.isError ? '加载 README 失败' : (readmeQuery.data ?? '')
-  const readmeLoading = readmeQuery.isPending
+  const readmeLoading = deferContent || readmeQuery.isPending
 
   const changelogQuery = useQuery({
     queryKey: ['plugin-changelog', plugin?.id, isInstalled, plugin?.manifest.changelog, plugin?.changelog],
-    enabled: !!plugin && !installedPluginsQuery.isPending,
+    enabled: !!plugin && !deferContent && !pluginQuery.isPlaceholderData && installedPluginsQuery.isSuccess,
     staleTime: 5 * 60 * 1000,
-    queryFn: ({ signal }) => loadPluginChangelog(plugin!, isInstalled, signal),
+    queryFn: ({ signal }) => fetchPluginDocument(plugin!.id, 'changelog', { preferLocal: isInstalled, signal }),
   })
   const changelog = selectedRelease ? selectedRelease.release_notes : changelogQuery.isError ? '加载更新日志失败' : (changelogQuery.data ?? '')
-  const changelogLoading = !selectedRelease && changelogQuery.isPending
+  const changelogLoading = deferContent || (!selectedRelease && changelogQuery.isPending)
 
-  // 任一写操作成功后，重新拉取已安装列表（前缀失效）
-  const invalidateInstalledPlugins = () =>
-    queryClient.invalidateQueries({ queryKey: ['plugin-installed-list'] })
+  // 任一写操作成功后，重新拉取已安装列表，并同步详情与外层市场的安装状态。
+  const refreshInstalledPlugins = async () => {
+    const installed = await getInstalledPlugins({ forceRefresh: true })
+    queryClient.setQueryData(['plugin-installed-list'], installed)
+    onInstalledPluginsChange?.(installed)
+  }
 
   // 检查是否需要更新
   const needsUpdate = () => {
     if (!plugin || !isInstalled || !installedVersion) return false
     if (releaseCatalog?.mode === 'releases') {
       if (!selectedRelease) return false
-      if (versionSelection) return selectedRelease.version !== installedVersion || versionSelection.pinned !== (installedRelease?.pinned ?? false)
-      if (installedRelease?.pinned) return false
+      if (versionSelection) return selectedRelease.version !== installedVersion
       const target = selectedRelease.version.split('.').map(Number)
       const current = installedVersion.split('.').map(Number)
       return target.some((value, index) => value > current[index] && target.slice(0, index).every((part, i) => part === current[i]))
@@ -440,6 +309,7 @@ export function PluginDetailPage({
 
   // 安装插件（失败由全局 mutation 错误 toast 呈现）
   const installMutation = useMutation({
+    onMutate: ({ plugin }: { plugin: PluginInfo }) => beginOperation(plugin, 'install'),
     mutationFn: (vars: { plugin: PluginInfo }) => {
       const repositoryUrl =
         vars.plugin.manifest.repository_url || vars.plugin.manifest.urls?.repository || ''
@@ -448,7 +318,9 @@ export function PluginDetailPage({
         : installPlugin(vars.plugin.id, repositoryUrl, 'main', releaseRequest)
     },
     meta: { errorTitle: '安装失败' },
+    onError: (error, vars) => finishOperation(vars.plugin, 'install', error),
     onSuccess: (_data, vars) => {
+      finishOperation(vars.plugin, 'install')
       // 记录下载统计
       if (vars.plugin.manifest.id) {
         recordPluginDownload(vars.plugin.manifest.id).catch((err) => {
@@ -462,28 +334,32 @@ export function PluginDetailPage({
       })
 
       // 重新加载安装状态
-      invalidateInstalledPlugins()
+      return refreshInstalledPlugins()
     },
   })
 
   // 卸载插件（失败由全局 mutation 错误 toast 呈现）
   const uninstallMutation = useMutation({
+    onMutate: ({ plugin }: { plugin: PluginInfo }) => beginOperation(plugin, 'uninstall'),
     mutationFn: (vars: { plugin: PluginInfo }) =>
       uninstallPlugin(vars.plugin.id),
     meta: { errorTitle: '卸载失败' },
+    onError: (error, vars) => finishOperation(vars.plugin, 'uninstall', error),
     onSuccess: (_data, vars) => {
+      finishOperation(vars.plugin, 'uninstall')
       toast({
         title: '卸载成功',
         description: `${vars.plugin.manifest.name} 已成功卸载`,
       })
 
       // 重新加载安装状态
-      invalidateInstalledPlugins()
+      return refreshInstalledPlugins()
     },
   })
 
   // 更新插件（失败由全局 mutation 错误 toast 呈现）
   const updateMutation = useMutation({
+    onMutate: ({ plugin }: { plugin: PluginInfo }) => beginOperation(plugin, 'update'),
     mutationFn: (vars: { plugin: PluginInfo }) => {
       const repositoryUrl =
         vars.plugin.manifest.repository_url || vars.plugin.manifest.urls?.repository || ''
@@ -492,36 +368,40 @@ export function PluginDetailPage({
         : updatePlugin(vars.plugin.id, repositoryUrl, 'main', releaseRequest)
     },
     meta: { errorTitle: '更新失败' },
+    onError: (error, vars) => finishOperation(vars.plugin, 'update', error),
     onSuccess: (data, vars) => {
+      finishOperation(vars.plugin, 'update')
       toast({
         title: '更新成功',
         description: `${vars.plugin.manifest.name} 已从 ${data.old_version} 更新到 ${data.new_version}`,
       })
 
       // 重新加载安装状态
-      invalidateInstalledPlugins()
+      return refreshInstalledPlugins()
     },
   })
 
-  // 任一写操作进行中即视为操作中（保持按钮禁用 / loading 语义）
+  // 写操作互斥；按钮的忙碌文字分别由各自 mutation 决定。
   const operating =
     installMutation.isPending || uninstallMutation.isPending || updateMutation.isPending
+  // 首屏元数据用于阅读，安装等操作要等完整详情到达后再开放。
+  const detailPending = pluginQuery.isPlaceholderData
 
   // 安装插件
   const handleInstall = () => {
-    if (!plugin || !gitStatus?.installed) return
+    if (!plugin || !gitStatus?.installed || detailPending || operating) return
     installMutation.mutate({ plugin })
   }
 
   // 卸载插件
   const handleUninstall = () => {
-    if (!plugin) return
+    if (!plugin || detailPending || operating) return
     uninstallMutation.mutate({ plugin })
   }
 
   // 更新插件
   const handleUpdate = () => {
-    if (!plugin || !gitStatus?.installed) return
+    if (!plugin || !gitStatus?.installed || detailPending || operating) return
     updateMutation.mutate({ plugin })
   }
 
@@ -530,17 +410,20 @@ export function PluginDetailPage({
   if (loading) {
     return (
       <div className={containerClassName}>
-        <div className="flex items-center gap-3">
+        <div className="flex min-w-0 items-center gap-2">
           <Button 
-            variant="ghost" 
+            variant="outline"
             size="icon"
             onClick={handleBack}
+            data-plugin-detail-back="true"
+            className="shrink-0 [&_svg]:size-5"
+            aria-label="返回插件市场"
           >
             <ArrowLeft className="h-5 w-5" />
           </Button>
           {!isDialog && (
             <div>
-              <h1 className="text-2xl sm:text-3xl font-bold">插件详情</h1>
+              <h1 className="text-lg! font-semibold! leading-snug!">{plugin?.manifest.name || '正在加载插件'}</h1>
             </div>
           )}
         </div>
@@ -554,17 +437,20 @@ export function PluginDetailPage({
   if (error || !plugin) {
     return (
       <div className={containerClassName}>
-        <div className="flex items-center gap-3">
+        <div className="flex min-w-0 items-center gap-2">
           <Button 
-            variant="ghost" 
+            variant="outline"
             size="icon"
             onClick={handleBack}
+            data-plugin-detail-back="true"
+            className="shrink-0 [&_svg]:size-5"
+            aria-label="返回插件市场"
           >
             <ArrowLeft className="h-5 w-5" />
           </Button>
           {!isDialog && (
             <div>
-              <h1 className="text-2xl sm:text-3xl font-bold">插件详情</h1>
+              <h1 className="text-lg! font-semibold! leading-snug!">{plugin?.manifest.name || '插件加载失败'}</h1>
             </div>
           )}
         </div>
@@ -581,19 +467,20 @@ export function PluginDetailPage({
   }
 
   const isCompatible = checkCompatibility()
-  const detailActionButtonClassName = 'h-auto min-h-16 px-5 text-base'
+  const displayManifest = selectedRelease?.manifest || plugin.manifest
+  const detailActionButtonClassName = 'h-10! flex-1 px-3 text-sm'
   const detailActionButtons = (
-    <div className="flex min-w-32 shrink-0 flex-col gap-2 sm:min-w-36 sm:flex-row">
+    <div className="flex min-w-0 flex-wrap items-center gap-2">
       {isInstalled ? (
         <>
           {needsUpdate() ? (
             <Button
               className={detailActionButtonClassName}
-              disabled={!gitStatus?.installed || operating || !isCompatible}
+              disabled={!gitStatus?.installed || operating || detailPending || !isCompatible}
               onClick={handleUpdate}
               title={!gitStatus?.installed ? 'Git 未安装' : undefined}
             >
-              {operating ? (
+              {updateMutation.isPending ? (
                 <>
                   <Loader2 className="h-4 w-4 mr-2 animate-spin" />
                   更新中...
@@ -609,11 +496,11 @@ export function PluginDetailPage({
           <Button
             className={detailActionButtonClassName}
             variant="destructive"
-            disabled={!gitStatus?.installed || operating}
+            disabled={!gitStatus?.installed || operating || detailPending}
             onClick={handleUninstall}
             title={!gitStatus?.installed ? 'Git 未安装' : undefined}
           >
-            {operating ? (
+            {uninstallMutation.isPending ? (
               <>
                 <Loader2 className="h-4 w-4 mr-2 animate-spin" />
                 卸载中...
@@ -629,7 +516,7 @@ export function PluginDetailPage({
       ) : (
         <Button
           className={detailActionButtonClassName}
-          disabled={!gitStatus?.installed || !isCompatible || operating}
+          disabled={!gitStatus?.installed || !isCompatible || operating || detailPending}
           onClick={handleInstall}
           title={
             !gitStatus?.installed
@@ -639,7 +526,7 @@ export function PluginDetailPage({
                 : undefined
           }
         >
-          {operating ? (
+          {installMutation.isPending ? (
             <>
               <Loader2 className="h-4 w-4 mr-2 animate-spin" />
               安装中...
@@ -652,58 +539,75 @@ export function PluginDetailPage({
           )}
         </Button>
       )}
+      {plugin.manifest.repository_url && (
+        <Button asChild variant="outline" className="h-10! shrink-0 px-3 text-sm">
+          <a href={plugin.manifest.repository_url} target="_blank" rel="noopener noreferrer">
+            <GitBranch className="h-4 w-4" />
+            仓库
+          </a>
+        </Button>
+      )}
     </div>
   )
 
   return (
     <div className={containerClassName}>
       {/* 页面标题和返回按钮 */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        <div className="flex items-center gap-3">
+      <div className="flex shrink-0 flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div className="flex min-w-0 items-center gap-2">
           <Button 
-            variant="ghost" 
+            variant="outline"
             size="icon"
             onClick={handleBack}
-            className="h-8 w-8 shrink-0"
+            data-plugin-detail-back="true"
+            className="shrink-0 [&_svg]:size-5"
+            aria-label="返回插件市场"
+            title="返回插件市场"
           >
             <ArrowLeft className="h-4 w-4" />
           </Button>
           {!isDialog && (
-            <div>
-              <h1 className="text-2xl sm:text-3xl font-bold">插件详情</h1>
-              <p className="text-muted-foreground mt-1 sm:mt-2 text-sm sm:text-base">
-                {plugin.manifest.name}
-              </p>
-            </div>
+            <h1 className="min-w-0 truncate text-lg! font-semibold! leading-snug!" title={plugin.manifest.name}>
+              {plugin.manifest.name}
+            </h1>
           )}
         </div>
       </div>
 
-      <ScrollArea className={detailScrollClassName}>
+      <ScrollArea
+        className={detailScrollClassName}
+        viewportClassName={isPanel ? 'max-lg:h-auto max-lg:!overflow-visible max-lg:overscroll-auto' : undefined}
+        scrollbars="vertical"
+      >
         <div className="space-y-6 pr-4">
           {/* 插件头部信息卡片 */}
-          <Card>
-            <CardHeader>
+          <Card data-plugin-detail-hero="true" className="grid min-w-0 grid-cols-1 lg:grid-cols-[minmax(0,1fr)_26rem]">
+            <CardHeader className="min-w-0 p-5 sm:p-6">
               <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-stretch">
-                <div className="flex-1 space-y-2">
+                <div className="min-w-0 flex-1 space-y-2">
                   <div className="flex items-start gap-4">
-                    <PluginIcon
-                      pluginId={plugin.id}
-                      manifest={plugin.manifest}
-                      installed={isInstalled}
-                      marketplaceIconUrl={plugin.assets?.icon_64}
-                      className="h-14 w-14"
-                      iconClassName="h-7 w-7"
-                    />
+                    <div data-plugin-detail-icon="true" className="shrink-0">
+                      <PluginIcon
+                        pluginId={plugin.id}
+                        manifest={plugin.manifest}
+                        installed={isInstalled}
+                        marketplaceIconUrl={plugin.assets?.icon_64}
+                        className="h-20 w-20"
+                        iconClassName="h-7 w-7"
+                      />
+                    </div>
                     <div className="min-w-0 space-y-2">
+                      <CardTitle className="break-words text-2xl">{plugin.manifest.name}</CardTitle>
                       <div className="flex items-center gap-3 flex-wrap">
-                        <CardTitle className="text-2xl">{plugin.manifest.name}</CardTitle>
-                        <Badge variant="secondary" className="text-sm">
+                        <Badge variant="secondary" data-plugin-detail-version="true" className="text-sm">
                           v{selectedRelease?.version || plugin.manifest.version}
                         </Badge>
-                        <Badge variant="outline" className="text-sm">
+                        <Badge variant="outline" data-plugin-detail-type="true" className="text-sm">
                           {getPluginTypeLabel(plugin)}
                         </Badge>
+                        {plugin.manifest.license && (
+                          <Badge variant="outline" className="text-xs">{plugin.manifest.license}</Badge>
+                        )}
                         {isInstalled && (
                           <Badge variant="default" className="text-sm">
                             <CheckCircle2 className="h-3 w-3 mr-1" />
@@ -724,94 +628,152 @@ export function PluginDetailPage({
                         )}
                       </div>
                       <CardDescription className="text-base">{plugin.manifest.description}</CardDescription>
+                      <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                        <span>作者 {plugin.manifest.author?.name || 'Unknown'}</span>
+                        <span>最新更新 {formatPluginUpdateDate(latestPluginUpdate)}</span>
+                      </div>
                     </div>
                   </div>
                 </div>
-                {detailActionButtons}
               </div>
             </CardHeader>
-          </Card>
-
-          {releaseCatalog && (
-            <Card>
-              <CardHeader><CardTitle className="text-lg">安装版本</CardTitle></CardHeader>
-              <CardContent className="space-y-3">
-                {releaseCatalog.sync_error ? (
+            <CardContent data-plugin-detail-release="true" className="min-w-0 space-y-3 border-t p-5 sm:p-6 lg:border-l lg:border-t-0">
+              {releaseCatalog?.mode === 'releases' && !releaseCatalog.sync_error && (
+                <label className="block min-w-0 space-y-2">
+                  <span className="block text-xs text-muted-foreground">选择版本</span>
+                  <select
+                    aria-label="选择发布版本"
+                    className="h-10 w-full min-w-0 rounded-md border border-input bg-background px-3 text-sm text-foreground"
+                    value={selectedRelease?.version || ''}
+                    disabled={operating || detailPending}
+                    onChange={(event) => setSelection({ pluginId, version: event.target.value })}
+                  >
+                    {!selectedRelease && <option value="" disabled>没有兼容的稳定版本，请查看其他版本</option>}
+                    {releaseCatalog.versions.map((release) => (
+                      <option key={release.version} value={release.version} disabled={!release.compatible}>
+                        {release.version}{release.version === releaseCatalog.recommended_version ? ' · 推荐' : ''}
+                        {release.prerelease ? ' · 预发布' : ''}{release.yanked ? ' · 已撤回' : ''}
+                        {!release.compatible ? ` · ${shortenReleaseReasons(release.reasons)}` : ''}
+                        {` · 更新于 ${formatPluginUpdateDate(release.published_at)}`}
+                      </option>
+                    ))}
+                    {releaseCatalog.rejected_releases?.map((release) => (
+                      <option
+                        key={`rejected:${release.tag}`}
+                        value={`rejected:${release.tag}`}
+                        disabled
+                        className="text-muted-foreground"
+                        title={describeRejectedReleaseError(release.error)}
+                      >
+                        {release.tag} · 校验失败 · {describeRejectedReleaseError(release.error)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
+              {detailActionButtons}
+              {operationProgress?.plugin_id === plugin.id && (
+                <div className="space-y-2 text-sm" role="status" aria-live="polite">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="min-w-0 break-words">{operationProgress.message}</span>
+                    <span className="shrink-0 tabular-nums">{operationProgress.progress}%</span>
+                  </div>
+                  <Progress value={operationProgress.progress} aria-label="插件操作进度" />
+                  {operationProgress.error && <p className="text-destructive break-words">{operationProgress.error}</p>}
+                  {operating && progressConnectionError && (
+                    <p className="text-destructive break-words">实时进度连接失败：{progressConnectionError}</p>
+                  )}
+                </div>
+              )}
+              <dl data-plugin-detail-compatibility="true" className="space-y-2 text-xs text-muted-foreground">
+                <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                  <dt>适配麦麦</dt>
+                  <dd className="font-mono">{displayManifest.host_application.min_version} — {displayManifest.host_application.max_version || '不限'}</dd>
+                </div>
+                {displayManifest.sdk && (
+                  <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                    <dt>Plugin SDK</dt>
+                    <dd className="font-mono">{displayManifest.sdk.min_version} — {displayManifest.sdk.max_version || '不限'}</dd>
+                  </div>
+                )}
+              </dl>
+              {releaseCatalog && (
+                releaseCatalog.sync_error ? (
                   <p role="alert" className="text-sm text-destructive">版本同步失败：{releaseCatalog.sync_error}</p>
                 ) : releaseCatalog.mode === 'branch' ? (
                   <p className="text-sm text-muted-foreground">该插件尚无可识别的发布版本，使用分支安装。</p>
                 ) : (
                   <>
-                    <label className="block space-y-2 text-sm">
-                      <span>选择发布版本</span>
-                      <select
-                        aria-label="选择发布版本"
-                        className="flex h-10 w-full rounded-md border border-input bg-background px-3 text-foreground"
-                        value={selectedRelease?.version || ''}
-                        disabled={operating}
-                        onChange={(event) => setSelection({ pluginId, version: event.target.value, pinned: versionSelection?.pinned ?? installedRelease?.pinned ?? false })}
-                      >
-                        {!selectedRelease && <option value="" disabled>没有兼容的稳定版本，请查看其他版本</option>}
-                        {releaseCatalog.versions.map((release) => (
-                          <option key={release.version} value={release.version} disabled={!release.compatible}>
-                            {release.version}{release.version === releaseCatalog.recommended_version ? ' · 推荐' : ''}
-                            {release.prerelease ? ' · 预发布' : ''}{release.yanked ? ' · 已撤回' : ''}
-                            {!release.compatible ? ` · ${shortenReleaseReasons(release.reasons)}` : ''}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <label className="flex items-center gap-2 text-sm">
-                      <input type="checkbox" disabled={!selectedRelease || operating}
-                        checked={versionSelection?.pinned ?? installedRelease?.pinned ?? false}
-                        onChange={(event) => selectedRelease && setSelection({ pluginId, version: selectedRelease.version, pinned: event.target.checked })}
-                      />
-                      安装后锁定此版本，阻止自动更新
-                    </label>
-                    <p className="text-sm text-muted-foreground">
-                      当前安装：{installedVersion || '未安装'}{installedRelease?.pinned ? '（已锁定）' : ''}；
-                      推荐版本：{releaseCatalog.recommended_version || '暂无兼容稳定版本'}
-                    </p>
-                    {selectedRelease && (
-                      <p className="text-sm text-muted-foreground">
-                        适配麦麦 {selectedRelease.manifest.host_application.min_version} — {selectedRelease.manifest.host_application.max_version || '不限'}
-                        ；SDK {selectedRelease.manifest.sdk?.min_version} — {selectedRelease.manifest.sdk?.max_version || '不限'}
-                      </p>
-                    )}
                     {versionSelection && installedVersion && selectedRelease?.version !== installedVersion && (
                       <p className="text-sm text-muted-foreground">切换版本会备份当前插件目录；降级不会回滚插件数据。</p>
                     )}
                     {!releaseCatalog.recommended_version && (
                       <p role="status" className="text-sm text-muted-foreground">没有兼容的稳定版本；可在列表中查看各版本不兼容的原因，或手动选择兼容的预发布版本。</p>
                     )}
-                    {!!releaseCatalog.rejected_releases?.length && (
-                      <details className="text-sm text-muted-foreground">
-                        <summary>有 {releaseCatalog.rejected_releases.length} 个发布版本未通过校验</summary>
-                        <ul className="mt-2 space-y-1">
-                          {releaseCatalog.rejected_releases.map((item) => (
-                            <li key={item.tag}>
-                              {item.tag}：{describeRejectedReleaseError(item.error)}
-                            </li>
-                          ))}
-                        </ul>
-                      </details>
-                    )}
                   </>
-                )}
-              </CardContent>
-            </Card>
-          )}
+                )
+              )}
+            </CardContent>
+          </Card>
 
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            {/* 左侧 - 详细信息 */}
-            <div className="lg:col-span-1 space-y-6">
+          <div className="grid grid-cols-1 items-start gap-6 lg:grid-cols-3">
+            {/* 左侧 - README 与更新日志共用卡片，通过标签切换，由外层详情容器统一滚动。 */}
+            <div className="min-w-0 space-y-6 lg:col-span-2">
+              <Tabs key={pluginId} defaultValue="readme" asChild>
+                <Card data-plugin-detail-doc-tabs="true">
+                  <CardHeader className="flex-row flex-wrap items-center justify-between gap-3 space-y-0">
+                    <CardTitle className="text-lg">插件说明</CardTitle>
+                    <TabsList aria-label="插件文档" className="ml-auto h-auto gap-2 bg-transparent p-0">
+                      <TabsTrigger value="readme" size="sm">README</TabsTrigger>
+                      <TabsTrigger value="changelog" size="sm">更新日志</TabsTrigger>
+                    </TabsList>
+                  </CardHeader>
+                  <TabsContent value="readme" asChild>
+                    <CardContent data-plugin-detail-doc="true">
+                      {readmeLoading ? (
+                        <div className="flex items-center justify-center py-12">
+                          <ThinkingIllustration />
+                        </div>
+                      ) : readme ? (
+                        <MarkdownRenderer content={readme} />
+                      ) : (
+                        <div className="text-center text-muted-foreground py-12">
+                          暂无说明文档
+                        </div>
+                      )}
+                    </CardContent>
+                  </TabsContent>
+                  <TabsContent value="changelog" asChild>
+                    <CardContent data-plugin-detail-doc="true">
+                      {changelogLoading ? (
+                        <div className="flex items-center justify-center py-12">
+                          <ThinkingIllustration />
+                        </div>
+                      ) : changelog ? (
+                        <MarkdownRenderer content={changelog} />
+                      ) : (
+                        <div className="text-center text-muted-foreground py-12">
+                          暂无更新日志
+                        </div>
+                      )}
+                    </CardContent>
+                  </TabsContent>
+                </Card>
+              </Tabs>
+            </div>
+
+            {/* 右侧 - 详细信息 */}
+            <div className="min-w-0 space-y-6 lg:col-span-1">
               {/* 统计信息 */}
-              <Card>
+              <Card data-plugin-detail-stats="true">
                 <CardHeader>
                   <CardTitle className="text-lg">统计信息</CardTitle>
                 </CardHeader>
                 <CardContent>
-                  {plugin.manifest.id && <PluginStats pluginId={plugin.manifest.id} />}
+                  <p className="mb-3 text-xs text-muted-foreground">
+                    最新更新：{formatPluginUpdateDate(latestPluginUpdate)}
+                  </p>
+                  {!deferContent && plugin.manifest.id && <PluginStats pluginId={plugin.manifest.id} />}
                 </CardContent>
               </Card>
 
@@ -820,8 +782,14 @@ export function PluginDetailPage({
                 <CardHeader>
                   <CardTitle className="text-lg">基本信息</CardTitle>
                 </CardHeader>
-                <CardContent className="space-y-4">
+                <CardContent data-plugin-detail-info="true" className="space-y-4">
                   <div className="space-y-3">
+                    <div className="flex items-start gap-2 text-sm">
+                      <Tag className="h-4 w-4 shrink-0 text-muted-foreground mt-0.5" />
+                      <span className="shrink-0 text-muted-foreground">插件 ID:</span>
+                      <span className="min-w-0 break-all font-mono font-medium select-all">{plugin.id}</span>
+                    </div>
+
                     <div className="flex items-center gap-2 text-sm">
                       <User className="h-4 w-4 text-muted-foreground" />
                       <span className="text-muted-foreground">作者:</span>
@@ -913,7 +881,7 @@ export function PluginDetailPage({
                   <CardContent className="space-y-4">
                     <div>
                       <p className="text-sm text-muted-foreground mb-2">关键词</p>
-                      <div className="flex flex-wrap gap-2">
+                      <div data-plugin-detail-keywords="true" className="flex flex-wrap gap-2">
                         {plugin.manifest.keywords.map((keyword) => (
                           <Badge key={keyword} variant="outline" className="text-xs">
                             <Tag className="h-3 w-3 mr-1" />
@@ -926,52 +894,6 @@ export function PluginDetailPage({
                 </Card>
               )}
             </div>
-
-            {/* 右侧 - README */}
-            <Card className="lg:col-span-2">
-              <CardHeader>
-                <CardTitle className="text-lg">插件说明</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <ScrollArea className={readmeScrollClassName}>
-                  {readmeLoading ? (
-                    <div className="flex items-center justify-center py-12">
-                      <ThinkingIllustration />
-                    </div>
-                  ) : readme ? (
-                    <MarkdownRenderer content={readme} />
-                  ) : (
-                    <div className="text-center text-muted-foreground py-12">
-                      暂无说明文档
-                    </div>
-                  )}
-                </ScrollArea>
-              </CardContent>
-            </Card>
-
-            <Card className="lg:col-span-2">
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2 text-lg">
-                  <FileText className="h-4 w-4 text-muted-foreground" />
-                  更新日志
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                <ScrollArea className="h-[min(36vh,420px)] pr-4">
-                  {changelogLoading ? (
-                    <div className="flex items-center justify-center py-12">
-                      <ThinkingIllustration />
-                    </div>
-                  ) : changelog ? (
-                    <MarkdownRenderer content={changelog} />
-                  ) : (
-                    <div className="text-center text-muted-foreground py-12">
-                      暂无更新日志
-                    </div>
-                  )}
-                </ScrollArea>
-              </CardContent>
-            </Card>
           </div>
         </div>
       </ScrollArea>

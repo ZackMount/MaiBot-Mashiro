@@ -3,6 +3,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
 
 import asyncio
+import threading
 
 from rich.traceback import install
 from sqlmodel import select
@@ -84,6 +85,7 @@ class ChatManager:
 
     def __init__(self) -> None:
         self.sessions: Dict[str, BotChatSession] = {}  # session_id -> BotChatSession
+        self._session_creation_lock = threading.RLock()
         self.last_messages: Dict[str, "SessionMessage"] = {}  # session_id -> SessionMessage
 
     async def initialize(self):
@@ -95,6 +97,20 @@ class ChatManager:
             logger.error(f"初始化聊天管理器出现错误: {e}")
 
     async def get_or_create_session(
+        self,
+        platform: str,
+        user_id: str,
+        group_id: Optional[str] = None,
+        account_id: Optional[str] = None,
+        scope: Optional[str] = None,
+    ) -> BotChatSession:
+        """聊天和 WebUI 上传共用正式创建链路，数据库访问放在线程池。"""
+        def create() -> BotChatSession:
+            with self._session_creation_lock:
+                return self._get_or_create_session(platform, user_id, group_id, account_id, scope)
+        return await asyncio.to_thread(create)
+
+    def _get_or_create_session(
         self,
         platform: str,
         user_id: str,
@@ -180,11 +196,8 @@ class ChatManager:
             raise ValueError("消息缺少平台信息")
         user_id = message.message_info.user_info.user_id
         group_id = message.message_info.group_info.group_id if message.message_info.group_info else None
-        account_id = None
-        scope = None
-        additional_config = message.message_info.additional_config
-        if isinstance(additional_config, dict):
-            account_id, scope = RouteKeyFactory.extract_components(additional_config)
+        route_key = RouteKeyFactory.from_session_message(message)
+        account_id, scope = route_key.account_id, route_key.scope
         session_id = SessionUtils.calculate_session_id(
             platform,
             user_id=user_id,
@@ -264,7 +277,7 @@ class ChatManager:
         try:
             for session in self.sessions.values():
                 self._save_session(session)
-            logger.info(f"共 {len(self.sessions)} 个会话已经保存到数据库中")
+            logger.debug(f"共 {len(self.sessions)} 个会话已经保存到数据库中")
         except Exception as e:
             logger.error(f"保存会话记录到数据库时发生错误: {e}")
             raise e

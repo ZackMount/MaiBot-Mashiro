@@ -1,5 +1,7 @@
 from typing import Any, TypeVar
 
+from src.web_search.config import WebConfig
+
 from .config_base import ConfigBase
 from .model_configs import APIProvider, ModelInfo, ModelTaskConfig, OpenAICompatibleAuthType, TaskConfig
 
@@ -32,13 +34,6 @@ DEFAULT_TASK_CONFIG_TEMPLATES: dict[str, dict[str, Any]] = {
         "selection_strategy": "random",
         "hard_timeout": 240.0,
     },
-    "mid_memory": {
-        "model_list": [],
-        "max_tokens": 8192,
-        "temperature": 0.7,
-        "selection_strategy": "random",
-        "hard_timeout": 180.0,
-    },
     "replyer": {
         "model_list": ["deepseek-v4-pro-think", "deepseek-v4-pro-nonthink"],
         "max_tokens": 8192,
@@ -54,7 +49,7 @@ DEFAULT_TASK_CONFIG_TEMPLATES: dict[str, dict[str, Any]] = {
         "hard_timeout": 180.0,
     },
     "learner": {"model_list": [], "max_tokens": 8192, "hard_timeout": 120.0},
-    "expression_use": {"model_list": [], "max_tokens": 8192, "temperature": 0.3, "hard_timeout": 120.0},
+    "fast_model": {"model_list": [], "max_tokens": 8192, "temperature": 0.3, "hard_timeout": 120.0},
     "emoji": {"model_list": [], "max_tokens": 8192, "hard_timeout": 120.0},
     "vlm": {"model_list": [], "max_tokens": 8192, "hard_timeout": 240.0},
     "voice": {"model_list": [], "max_tokens": 8192, "hard_timeout": 120.0},
@@ -66,6 +61,7 @@ DEFAULT_MODEL_TEMPLATES: list[dict[str, Any]] = [
     {
         "model_identifier": "deepseek-v4-pro",
         "name": "deepseek-v4-pro-think",
+        "model_type": "llm",
         "api_provider": "DeepSeek",
         "price_in": 12.0,
         "price_out": 24.0,
@@ -77,6 +73,7 @@ DEFAULT_MODEL_TEMPLATES: list[dict[str, Any]] = [
     {
         "model_identifier": "deepseek-v4-pro",
         "name": "deepseek-v4-pro-nonthink",
+        "model_type": "llm",
         "api_provider": "DeepSeek",
         "price_in": 12.0,
         "price_out": 24.0,
@@ -88,6 +85,7 @@ DEFAULT_MODEL_TEMPLATES: list[dict[str, Any]] = [
     {
         "model_identifier": "deepseek-v4-flash",
         "name": "deepseek-v4-flash",
+        "model_type": "llm",
         "api_provider": "DeepSeek",
         "price_in": 1.0,
         "price_out": 2.0,
@@ -122,6 +120,7 @@ def create_default_model_config(config_class: type[T]) -> T:
         task_config_fields[field_name] = TaskConfig(**task_template)
 
     return config_class(
+        web=WebConfig(),
         models=[ModelInfo(**model_template) for model_template in build_default_model_templates()],
         model_task_config=ModelTaskConfig(**task_config_fields),
         api_providers=[APIProvider(**provider_template) for provider_template in DEFAULT_PROVIDER_TEMPLATES],

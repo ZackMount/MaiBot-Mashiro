@@ -147,7 +147,10 @@ class MetadataEpisodeMixin:
                 END,
                 retry_count = 0,
                 last_error = NULL,
-                reason = excluded.reason,
+                reason = CASE
+                    WHEN episode_rebuild_sources.reason = 'fact_evidence_retracted'
+                     AND episode_rebuild_sources.desired_revision > episode_rebuild_sources.built_revision
+                    THEN episode_rebuild_sources.reason ELSE excluded.reason END,
                 requested_at = excluded.requested_at,
                 updated_at = excluded.updated_at,
                 desired_revision = COALESCE(episode_rebuild_sources.desired_revision, 0) + 1,
@@ -413,6 +416,7 @@ class MetadataEpisodeMixin:
         claimed_revision: int,
         generation_hash: str,
         episodes_payloads: List[Dict[str, Any]],
+        empty_group_fingerprints: Optional[List[str]] = None,
         now: Optional[float] = None,
     ) -> Dict[str, Any]:
         """仅在来源版本未变化时替换完整快照并完成任务。"""
@@ -465,7 +469,9 @@ class MetadataEpisodeMixin:
                     "episode_count": 0,
                 }
 
-            replace_result = self.replace_episodes_for_source(token, episodes_payloads)
+            replace_result = self.replace_episodes_for_source(
+                token, episodes_payloads, empty_group_fingerprints=empty_group_fingerprints,
+            )
             cursor.execute(
                 """
                 UPDATE episode_rebuild_sources
@@ -655,11 +661,13 @@ class MetadataEpisodeMixin:
             FROM paragraphs
             WHERE TRIM(COALESCE(source, '')) = ?
               AND (is_deleted IS NULL OR is_deleted = 0)
+              AND COALESCE(json_extract(metadata, '$.dedup_phase'), 'complete') = 'complete'
             ORDER BY created_at ASC, hash ASC
             """,
             (token,),
         )
         rows = [self._row_to_dict(row, "paragraph") for row in cursor.fetchall()]
+        rows = [value for row in rows if (value := self.project_fact_paragraph(row)) is not None]
         if not exclude_stale:
             return rows
         paragraph_hashes = [
@@ -738,16 +746,20 @@ class MetadataEpisodeMixin:
         placeholders = ",".join("?" for _ in tokens)
         cursor.execute(
             f"""
-            SELECT source, desired_revision, built_revision
+            SELECT source, desired_revision, built_revision, reason
             FROM episode_rebuild_sources
             WHERE source IN ({placeholders})
             """,
             tuple(tokens),
         )
         # 仅「登记了重建、但一个完整物化版本都没有」的来源需要进一步核对 episodes
+        source_rows = cursor.fetchall()
+        invalidated = {row["source"] for row in source_rows
+                       if row["reason"] == "fact_evidence_retracted"
+                       and int(row["desired_revision"] or 0) > int(row["built_revision"] or 0)}
         candidates = {
             row["source"]
-            for row in cursor.fetchall()
+            for row in source_rows
             if int(row["built_revision"] or 0) <= 0 and int(row["desired_revision"] or 0) > 0
         }
         materialized: set[str] = set()
@@ -763,14 +775,24 @@ class MetadataEpisodeMixin:
             materialized = {row["source"] for row in cursor.fetchall() if row["source"]}
 
         return {
-            source: token in candidates and token not in materialized
+            source: token in invalidated or (token in candidates and token not in materialized)
             for source, token in normalized.items()
         }
+
+    def get_episode_empty_group_fingerprints(self, source: str) -> List[str]:
+        """读取已成功处理且结果为空的分组。"""
+        cursor = self._conn.execute(
+            "SELECT input_fingerprint FROM episode_empty_groups WHERE source = ?",
+            (self._normalize_episode_source(source),),
+        )
+        return [str(row["input_fingerprint"]) for row in cursor.fetchall()]
 
     def replace_episodes_for_source(
         self,
         source: str,
         episodes_payloads: List[Dict[str, Any]],
+        *,
+        empty_group_fingerprints: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """按 source 全量替换 episode 结果。"""
         token = self._normalize_episode_source(source)
@@ -782,6 +804,12 @@ class MetadataEpisodeMixin:
 
         with self.transaction(immediate=True) as connection:
             cursor = connection.cursor()
+            # 空结果与情景快照在同一事务中发布；失效租约不能提前写入缓存。
+            cursor.execute("DELETE FROM episode_empty_groups WHERE source = ?", (token,))
+            cursor.executemany(
+                "INSERT INTO episode_empty_groups (source, input_fingerprint) VALUES (?, ?)",
+                [(token, fingerprint) for fingerprint in dict.fromkeys(empty_group_fingerprints or [])],
+            )
             cursor.execute(
                 """
                 SELECT episode_id, created_at

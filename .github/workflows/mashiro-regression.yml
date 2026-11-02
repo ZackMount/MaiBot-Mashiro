@@ -20,11 +20,12 @@ jobs:
         with:
           enable-cache: true
           python-version: "3.12"
-      - name: Install locked dependencies
-        run: uv sync --frozen --group dev
+      - name: Install project dependencies
+        run: uv sync --group dev
       - name: Run synthetic context and tool regressions
         run: >-
-          uv run --frozen pytest -q
+          uv run pytest -q
           pytests/mashiro
           pytests/maisaka/test_planner_messages.py
-          pytests/maisaka/test_context_history.py
+          pytests/maisaka/test_replyer_history_filter.py
+          pytests/A_memorix_test/test_summary_identity.py

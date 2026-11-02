@@ -5,10 +5,12 @@ WebUI Token 管理模块
 
 from pathlib import Path
 from typing import Dict, Optional, Tuple
+from urllib.parse import quote
 
 import json
 import secrets
 
+from src.common.paths import get_instance_root
 from src.common.logger import get_logger
 
 logger = get_logger("webui")
@@ -30,7 +32,7 @@ class TokenManager:
         """
         if config_path is None:
             # 获取项目根目录 (src/webui/core -> src/webui -> src -> 根目录)
-            project_root = Path(__file__).parent.parent.parent.parent
+            project_root = get_instance_root()
             config_path = project_root / "data" / "webui.json"
 
         self.config_path = config_path
@@ -166,8 +168,8 @@ class TokenManager:
             logger.error("系统中没有有效的 token")
             return False
 
-        # 使用 secrets.compare_digest 防止时序攻击
-        is_valid = secrets.compare_digest(token, current_token)
+        # 使用 UTF-8 字节比较支持 Unicode，并保留 compare_digest 的时序攻击防护。
+        is_valid = secrets.compare_digest(token.encode("utf-8"), current_token.encode("utf-8"))
 
         if is_valid:
             logger.debug("Token 验证成功")
@@ -175,6 +177,19 @@ class TokenManager:
             logger.warning("Token 验证失败")
 
         return is_valid
+
+    @staticmethod
+    def encode_cookie_token(token: str) -> str:
+        """Unicode 密码编码为 ASCII Cookie；已有 ASCII Cookie 保持不变。"""
+        return token if token.isascii() else quote(token, safe="")
+
+    def verify_cookie_token(self, token: str) -> bool:
+        """按 Cookie 的编码形式校验，不将编码后的密码当作原始登录密码。"""
+        current_token = self.get_token()
+        if not token or not current_token:
+            return False
+        expected = self.encode_cookie_token(current_token)
+        return secrets.compare_digest(token.encode("utf-8"), expected.encode("utf-8"))
 
     def update_token(self, new_token: str) -> Tuple[bool, str]:
         """
@@ -283,12 +298,12 @@ class TokenManager:
             return False, "Token 长度至少为 10 位"
 
         # 检查是否包含大写字母
-        has_upper = any(c.isupper() for c in token)
+        has_upper = any("A" <= c <= "Z" for c in token)
         if not has_upper:
             return False, "Token 必须包含大写字母"
 
         # 检查是否包含小写字母
-        has_lower = any(c.islower() for c in token)
+        has_lower = any("a" <= c <= "z" for c in token)
         if not has_lower:
             return False, "Token 必须包含小写字母"
 
@@ -328,9 +343,12 @@ class TokenManager:
             logger.error(f"标记首次配置完成失败: {e}")
             return False
 
-    def reset_setup_status(self) -> bool:
+    def reset_setup_status(self, *, reset_password: bool = False) -> bool:
         """
         重置首次配置状态，允许重新进入配置向导
+
+        Args:
+            reset_password: 同时生成临时密码，使向导重新显示密码设置步骤。
 
         Returns:
             bool: 是否重置成功
@@ -340,6 +358,11 @@ class TokenManager:
             config["first_setup_completed"] = False
             if "setup_completed_at" in config:
                 del config["setup_completed_at"]
+            # 密码和向导状态一次保存，避免重置到一半时仍跳过密码步骤。
+            if reset_password:
+                config["access_token"] = secrets.token_hex(32)
+                config["token_source"] = TOKEN_SOURCE_TEMPORARY
+                config["updated_at"] = self._get_current_timestamp()
             self._save_config(config)
             logger.info("首次配置状态已重置")
             return True

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 
 import { checkPluginInstalled, getInstalledPluginVersion } from './installed'
-import type { InstalledPlugin, LegacyInstalledPlugin } from './types'
+import type { InstalledPlugin } from './types'
 
 vi.mock('@/lib/http', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/http')>()
@@ -31,12 +31,10 @@ async function loadInstalledModule() {
     getMock: vi.mocked(http.backendApi.get),
     ApiError: http.ApiError,
     getInstalledPlugins: mod.getInstalledPlugins,
-    getLocalPluginReadme: mod.getLocalPluginReadme,
-    getLocalPluginChangelog: mod.getLocalPluginChangelog,
   }
 }
 
-/** 构造一个最小可用的已安装插件（新格式，带 manifest） */
+/** 构造一个最小可用的已安装插件（带 manifest） */
 function makeInstalledPlugin(id: string, version: string): InstalledPlugin {
   return {
     id,
@@ -117,11 +115,11 @@ describe('getInstalledPlugins', () => {
     expect(getMock).toHaveBeenCalledTimes(1)
   })
 
-  it('HTTP 层错误（非 401）被吞掉并返回空列表', async () => {
+  it('HTTP 层错误向上抛出，不伪装成空列表', async () => {
     const { getMock, getInstalledPlugins, ApiError } = await loadInstalledModule()
     getMock.mockRejectedValue(new ApiError('获取已安装插件列表失败', { status: 500 }))
 
-    await expect(getInstalledPlugins()).resolves.toEqual([])
+    await expect(getInstalledPlugins()).rejects.toMatchObject({ status: 500 })
   })
 
   it('401 认证失效向上抛出 ApiError', async () => {
@@ -153,8 +151,8 @@ describe('getInstalledPlugins', () => {
 
   it('失败结算后不写入 TTL 缓存，下一次调用重新请求', async () => {
     const { getMock, getInstalledPlugins, ApiError } = await loadInstalledModule()
-    getMock.mockRejectedValueOnce(new ApiError('认证失效', { status: 401 }))
-    await expect(getInstalledPlugins()).rejects.toMatchObject({ status: 401 })
+    getMock.mockRejectedValueOnce(new ApiError('服务异常', { status: 500 }))
+    await expect(getInstalledPlugins()).rejects.toMatchObject({ status: 500 })
 
     // 失败不会缓存结果：下一次调用应重新发起请求并成功
     const plugins = [makeInstalledPlugin('demo', '1.2.0')]
@@ -163,63 +161,18 @@ describe('getInstalledPlugins', () => {
     expect(getMock).toHaveBeenCalledTimes(2)
   })
 
-  it('业务级失败（success 为 false）返回空列表', async () => {
+  it('业务级失败（success 为 false）保留错误原因', async () => {
     const { getMock, getInstalledPlugins } = await loadInstalledModule()
     getMock.mockResolvedValue({ success: false, message: '插件系统未初始化' })
 
-    await expect(getInstalledPlugins()).resolves.toEqual([])
+    await expect(getInstalledPlugins()).rejects.toThrow('插件系统未初始化')
   })
 
-  it('success 为 true 但 plugins 字段缺省时返回空列表', async () => {
+  it('success 为 true 但 plugins 字段缺省时报协议错误', async () => {
     const { getMock, getInstalledPlugins } = await loadInstalledModule()
     getMock.mockResolvedValue({ success: true })
 
-    await expect(getInstalledPlugins()).resolves.toEqual([])
-  })
-})
-
-describe('getLocalPluginReadme', () => {
-  it('成功时返回 README 文本，且插件 ID 经过 URL 编码', async () => {
-    const { getMock, getLocalPluginReadme } = await loadInstalledModule()
-    getMock.mockResolvedValue({ success: true, data: '# 演示插件' })
-
-    await expect(getLocalPluginReadme('demo/plugin')).resolves.toBe('# 演示插件')
-    expect(getMock).toHaveBeenCalledWith('/api/webui/plugins/local-readme/demo%2Fplugin', {
-      errorMessage: '获取 README 失败',
-    })
-  })
-
-  it('业务级失败时返回空字符串', async () => {
-    const { getMock, getLocalPluginReadme } = await loadInstalledModule()
-    getMock.mockResolvedValue({ success: false, error: '文件不存在' })
-
-    await expect(getLocalPluginReadme('demo')).resolves.toBe('')
-  })
-
-  it('success 为 true 但 data 缺省时返回空字符串', async () => {
-    const { getMock, getLocalPluginReadme } = await loadInstalledModule()
-    getMock.mockResolvedValue({ success: true })
-
-    await expect(getLocalPluginReadme('demo')).resolves.toBe('')
-  })
-})
-
-describe('getLocalPluginChangelog', () => {
-  it('成功时返回更新日志文本', async () => {
-    const { getMock, getLocalPluginChangelog } = await loadInstalledModule()
-    getMock.mockResolvedValue({ success: true, data: '## 1.2.0\n- 修复问题' })
-
-    await expect(getLocalPluginChangelog('demo')).resolves.toBe('## 1.2.0\n- 修复问题')
-    expect(getMock).toHaveBeenCalledWith('/api/webui/plugins/local-changelog/demo', {
-      errorMessage: '获取更新日志失败',
-    })
-  })
-
-  it('业务级失败时返回空字符串', async () => {
-    const { getMock, getLocalPluginChangelog } = await loadInstalledModule()
-    getMock.mockResolvedValue({ success: false, error: '文件不存在' })
-
-    await expect(getLocalPluginChangelog('demo')).resolves.toBe('')
+    await expect(getInstalledPlugins()).rejects.toThrow('已安装插件列表响应缺少有效的 plugins 数组')
   })
 })
 
@@ -238,20 +191,10 @@ describe('checkPluginInstalled', () => {
 })
 
 describe('getInstalledPluginVersion', () => {
-  it('新格式插件从 manifest 中取版本号', () => {
+  it('从 manifest 中取版本号', () => {
     const installed = [makeInstalledPlugin('demo', '2.3.4')]
 
     expect(getInstalledPluginVersion('demo', installed)).toBe('2.3.4')
-  })
-
-  it('旧格式插件直接取顶层 version 字段', () => {
-    const legacy: LegacyInstalledPlugin = {
-      id: 'legacy-demo',
-      version: '0.9.0',
-      path: '/plugins/legacy-demo',
-    }
-
-    expect(getInstalledPluginVersion('legacy-demo', [legacy])).toBe('0.9.0')
   })
 
   it('插件不存在时返回 undefined', () => {

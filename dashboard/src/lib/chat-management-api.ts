@@ -66,6 +66,12 @@ export interface ChatTalkFrequencyDetail {
   matched_rules: ChatTalkFrequencyRule[]
 }
 
+export interface ChatPrivateReplyDetail {
+  paused: boolean
+  global_paused: boolean
+  has_override: boolean
+}
+
 export interface ChatPromptDetail {
   base_prompt_type: ChatStreamType | string
   base_prompt_title: string
@@ -123,6 +129,15 @@ export interface AdapterHostPolicySection {
 export interface AdapterHostPolicy {
   group: AdapterHostPolicySection
   private: AdapterHostPolicySection
+  policy_groups?: AdapterHostPolicyGroup[]
+  active_group?: string
+}
+
+export interface AdapterHostPolicyGroup {
+  id: string
+  name: string
+  group: AdapterHostPolicySection
+  private: AdapterHostPolicySection
 }
 
 /** 聊天流的适配器放行状态：不允许时 reason 说明被阻止的原因 */
@@ -175,9 +190,9 @@ export interface ChatStreamDetail {
   group_id: string | null
   user_id: string | null
   expression: ChatLearningStatus
-  behavior?: ChatLearningStatus
   jargon: ChatLearningStatus
   talk_frequency: ChatTalkFrequencyDetail
+  private_reply: ChatPrivateReplyDetail | null
   prompts: ChatPromptDetail
   adapters: ChatAdapterStatus[]
 }
@@ -343,6 +358,23 @@ export async function updateChatStreamTalkFrequency(
   return result.detail
 }
 
+export async function updateChatStreamPrivateReplyPause(
+  sessionId: string,
+  paused: boolean | null
+): Promise<ChatStreamDetail> {
+  const result = await backendApi.put<ChatStreamDetailResponse>(
+    `/api/chat/sessions/${encodeURIComponent(sessionId)}/private-reply-pause`,
+    {
+      body: { paused },
+      errorMessage: '保存私聊暂停设置失败',
+    }
+  )
+  if (!result.detail) {
+    throw new Error('聊天流详情为空')
+  }
+  return result.detail
+}
+
 export async function deleteChatStreamTalkFrequency(
   sessionId: string,
   time: string
@@ -362,7 +394,7 @@ export async function deleteChatStreamTalkFrequency(
 
 export async function updateChatStreamLearning(
   sessionId: string,
-  kind: 'expression' | 'jargon' | 'behavior',
+  kind: 'expression' | 'jargon',
   payload: UpdateLearningPayload
 ): Promise<ChatStreamDetail> {
   const result = await backendApi.put<ChatStreamDetailResponse>(

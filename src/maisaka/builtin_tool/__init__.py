@@ -5,30 +5,33 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Dict, List, Literal, Optional
 
-from src.config.config import global_config
+from src.config.config import global_config, model_config
 from src.core.tooling import ToolAvailabilityContext, ToolExecutionContext, ToolExecutionResult, ToolInvocation, ToolSpec
 from src.llm_models.payload_content.tool_option import ToolDefinitionInput
-from src.maisaka.focus import focus_mode_manager
 
 from .context import BuiltinToolRuntimeContext
-from .fetch_history import get_tool_spec as get_fetch_history_tool_spec
-from .fetch_history import handle_tool as handle_fetch_history_tool
 from .query_memory import get_tool_spec as get_query_memory_tool_spec
 from .query_memory import handle_tool as handle_query_memory_tool
 from .query_image_memory import get_tool_spec as get_query_image_memory_tool_spec
 from .query_image_memory import handle_tool as handle_query_image_memory_tool
 from .query_person_profile import get_tool_spec as get_query_person_profile_tool_spec
 from .query_person_profile import handle_tool as handle_query_person_profile_tool
+from .read_tool_result import get_tool_spec as get_read_tool_result_tool_spec
+from .read_tool_result import handle_tool as handle_read_tool_result_tool
 from .reply import get_tool_spec as get_reply_tool_spec
 from .reply import handle_tool as handle_reply_tool
 from .send_emoji import get_tool_spec as get_send_emoji_tool_spec
 from .send_emoji import handle_tool as handle_send_emoji_tool
-from .send_image import get_tool_spec as get_send_image_tool_spec
-from .send_image import handle_tool as handle_send_image_tool
 from .show_emoji_list import get_tool_spec as get_show_emoji_list_tool_spec
 from .show_emoji_list import handle_tool as handle_show_emoji_list_tool
-from .switch_chat import get_tool_spec as get_switch_chat_tool_spec
-from .switch_chat import handle_tool as handle_switch_chat_tool
+from .stop import get_tool_spec as get_stop_tool_spec
+from .stop import handle_tool as handle_stop_tool
+from .subagent import get_status_tool_spec as get_subagent_status_tool_spec
+from .subagent import get_stop_tool_spec as get_subagent_stop_tool_spec
+from .subagent import get_tool_spec as get_subagent_tool_spec
+from .subagent import handle_status_tool as handle_subagent_status_tool
+from .subagent import handle_stop_tool as handle_subagent_stop_tool
+from .subagent import handle_tool as handle_subagent_tool
 from .tool_search import get_tool_spec as get_tool_search_tool_spec
 from .tool_search import handle_tool as handle_tool_search_tool
 from .view_forward_message import get_tool_spec as get_view_forward_message_tool_spec
@@ -57,10 +60,10 @@ class BuiltinToolEntry:
     visibility: BuiltinToolVisibility = "visible"
     chat_scope: BuiltinToolChatScope = "all"
 
-    def build_spec(self) -> ToolSpec:
+    def build_spec(self, context: Optional[ToolAvailabilityContext] = None) -> ToolSpec:
         """生成带统一可见性元数据的工具声明。"""
 
-        tool_spec = deepcopy(self.get_spec())
+        tool_spec = deepcopy(get_reply_tool_spec(context) if self.name == "reply" else self.get_spec())
         tool_spec.metadata["builtin_stage"] = self.stage
         tool_spec.metadata["visibility"] = self.visibility
         return tool_spec
@@ -86,6 +89,7 @@ def _get_query_image_memory_tool_spec() -> ToolSpec:
 
 BUILTIN_TOOL_ENTRIES: List[BuiltinToolEntry] = [
     BuiltinToolEntry("wait", get_wait_tool_spec, handle_wait_tool, stage="both"),
+    BuiltinToolEntry("stop", get_stop_tool_spec, handle_stop_tool, stage="action"),
     BuiltinToolEntry("reply", get_reply_tool_spec, handle_reply_tool, stage="action"),
     BuiltinToolEntry(
         "view_forward_message",
@@ -109,15 +113,16 @@ BUILTIN_TOOL_ENTRIES: List[BuiltinToolEntry] = [
     ),
     BuiltinToolEntry("send_emoji", get_send_emoji_tool_spec, handle_send_emoji_tool, stage="action"),
     BuiltinToolEntry("show_emoji_list", get_show_emoji_list_tool_spec, handle_show_emoji_list_tool, stage="action"),
-    BuiltinToolEntry("send_image", get_send_image_tool_spec, handle_send_image_tool, stage="action"),
     BuiltinToolEntry("tool_search", get_tool_search_tool_spec, handle_tool_search_tool, stage="action"),
+    BuiltinToolEntry("subagent", get_subagent_tool_spec, handle_subagent_tool, stage="action"),
+    BuiltinToolEntry("subagent_status", get_subagent_status_tool_spec, handle_subagent_status_tool, stage="action"),
+    BuiltinToolEntry("subagent_stop", get_subagent_stop_tool_spec, handle_subagent_stop_tool, stage="action"),
     BuiltinToolEntry(
-        "fetch_history",
-        get_fetch_history_tool_spec,
-        handle_fetch_history_tool,
+        "read_tool_result",
+        get_read_tool_result_tool_spec,
+        handle_read_tool_result_tool,
         stage="action",
     ),
-    BuiltinToolEntry("switch_chat", get_switch_chat_tool_spec, handle_switch_chat_tool, stage="action"),
 ]
 
 
@@ -144,25 +149,23 @@ def _is_builtin_tool_enabled_by_config(entry: BuiltinToolEntry) -> bool:
     """根据全局配置判断内置工具是否应暴露。"""
 
     if entry.name == "show_emoji_list":
-        return bool(global_config.experimental.enable_rich_reply)
-    if entry.name in {"send_emoji", "send_image"} and bool(global_config.experimental.enable_rich_reply):
-        return False
-    if entry.name in {"fetch_history", "switch_chat"}:
-        return bool(global_config.experimental.focus_mode)
+        return global_config.emoji.use_new_send_logic
+    if entry.name == "send_emoji":
+        return not global_config.emoji.use_new_send_logic
+    if entry.name == "subagent":
+        return global_config.capabilities.planner_subagent
+    if entry.name in {"subagent_status", "subagent_stop"}:
+        # 只有后台子代理才有需要查看和终止的任务
+        return global_config.capabilities.planner_subagent and global_config.capabilities.advanced_sub_agent
+    if entry.name == "read_tool_result":
+        # 长结果整理和统一联网工具均会暂存原文，任一开启都需要回查入口。
+        return global_config.capabilities.tool_result_condense or bool(model_config.model_task_config.web_search.model_list)
     return True
 
 
 def _is_builtin_tool_available(entry: BuiltinToolEntry, context: ToolAvailabilityContext) -> bool:
     """判断内置工具是否适用于当前聊天。"""
 
-    if entry.name in {"fetch_history", "switch_chat"}:
-        if context.session_id:
-            return focus_mode_manager.is_enabled_for_session(
-                context.session_id,
-                is_group_chat=context.is_group_chat,
-            )
-        if not focus_mode_manager.is_enabled_for_chat(is_group_chat=context.is_group_chat):
-            return False
     if entry.chat_scope == "all":
         return True
     if entry.chat_scope == "group":
@@ -192,14 +195,14 @@ def is_builtin_tool_in_action_stage(tool_spec: ToolSpec) -> bool:
 def get_all_builtin_tool_specs(context: Optional[ToolAvailabilityContext] = None) -> List[ToolSpec]:
     """获取全部内置工具声明。"""
 
-    return [entry.build_spec() for entry in _get_builtin_tool_entries(context=context)]
+    return [entry.build_spec(context) for entry in _get_builtin_tool_entries(context=context)]
 
 
 def get_builtin_tools(context: Optional[ToolAvailabilityContext] = None) -> List[ToolDefinitionInput]:
     """获取默认暴露给模型层的内置工具定义。"""
 
     tool_specs = [
-        entry.build_spec()
+        entry.build_spec(context)
         for entry in _get_builtin_tool_entries(stage="action", visibility="visible", context=context)
     ]
     return [tool_spec.to_llm_definition() for tool_spec in tool_specs if tool_spec.enabled]

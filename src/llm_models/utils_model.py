@@ -11,6 +11,7 @@ import random
 import re
 import time
 import traceback
+import uuid
 
 from openai import APITimeoutError
 from rich.traceback import install
@@ -32,7 +33,6 @@ from src.llm_models.exceptions import (
     RespNotOkException,
     RespParseException,
 )
-from src.llm_models.model_client import ensure_configured_clients_loaded
 from src.llm_models.model_client.base_client import (
     APIResponse,
     AudioTranscriptionRequest,
@@ -46,6 +46,7 @@ from src.llm_models.model_client.base_client import (
     client_registry,
 )
 from src.llm_models.generation_diagnostics import sanitize_diagnostic_url
+from src.llm_models.image_normalizer import normalize_context_images
 from src.llm_models.request_snapshot import (
     attach_request_snapshot,
     format_request_snapshot_log_info,
@@ -64,6 +65,7 @@ from src.llm_models.payload_content.tool_option import (
     normalize_tool_options,
 )
 from src.llm_models.utils import compress_messages, llm_usage_recorder
+from src.services.model_task_usage_service import track_model_task_usage
 
 install(extra_lines=3)
 
@@ -76,9 +78,8 @@ DATA_URI_LIMIT_PATTERN = re.compile(
 DATA_URI_RETRY_MARGIN_BYTES = 128 * 1024
 MIN_COMPRESSED_IMAGE_TARGET_SIZE_BYTES = 512 * 1024
 EMPTY_TASK_FALLBACKS = {
-    "expression_use": "utils",
+    "fast_model": "utils",
     "learner": "utils",
-    "mid_memory": "planner",
 }
 EMBEDDING_TASK_NAMES = {"embedding", "image_embedding"}
 """嵌入类任务：向量空间必须保持一致，因此忽略配置里的选择策略，始终按配置顺序取第一个可用模型"""
@@ -145,14 +146,19 @@ class LLMOrchestrator:
         task_config = getattr(model_task_config, self.task_name, None)
         if not isinstance(task_config, TaskConfig):
             raise ValueError(f"未找到名为 '{self.task_name}' 的任务配置")
-        if not any(str(model_name).strip() for model_name in task_config.model_list):
-            fallback_task_name = EMPTY_TASK_FALLBACKS.get(self.task_name, "")
+        effective_task_name = self.task_name
+        # 按任务继用链解析，快速模型和学习模型留空时继用 utils。
+        while not any(str(model_name).strip() for model_name in task_config.model_list):
+            fallback_task_name = EMPTY_TASK_FALLBACKS.get(effective_task_name, "")
             if fallback_task_name:
                 fallback_task_config = getattr(model_task_config, fallback_task_name, None)
                 if isinstance(fallback_task_config, TaskConfig):
-                    return fallback_task_config
+                    task_config = fallback_task_config
+                    effective_task_name = fallback_task_name
+                    continue
             if self.task_name == "image_embedding":
                 raise ValueError("图片嵌入任务未配置模型，请在 image_embedding 中指定支持图片嵌入的模型")
+            break
         return task_config
 
     def _refresh_task_config(self) -> TaskConfig:
@@ -316,9 +322,11 @@ class LLMOrchestrator:
             total_tokens=response.usage.total_tokens if response.usage is not None else 0,
             prompt_cache_hit_tokens=response.usage.prompt_cache_hit_tokens if response.usage is not None else 0,
             prompt_cache_miss_tokens=response.usage.prompt_cache_miss_tokens if response.usage is not None else 0,
+            prompt_cache_reported=response.usage.prompt_cache_reported if response.usage is not None else False,
             provider_response=response.provider_response,
             wire_protocol=response.wire_protocol,
             request_wire_payload=response.request_wire_payload,
+            request_snapshot=response.request_snapshot,
         )
 
     async def generate_response_for_image(
@@ -416,6 +424,7 @@ class LLMOrchestrator:
         raise_when_empty: bool = True,
         interrupt_flag: asyncio.Event | None = None,
         session_id: str = "",
+        force_stream_mode: bool = False,
     ) -> LLMResponseResult:
         """异步生成文本响应。
 
@@ -427,6 +436,7 @@ class LLMOrchestrator:
             response_format: 响应格式约束。
             raise_when_empty: 保留字段，当前版本暂未单独使用。
             interrupt_flag: 外部中断标记；被设置时会尽快终止请求。
+            force_stream_mode: 仅为当前请求强制流式，不修改共享模型配置。
 
         Returns:
             LLMResponseResult: 统一文本响应结果对象。
@@ -451,6 +461,7 @@ class LLMOrchestrator:
             tool_options=tool_built,
             response_format=response_format,
             interrupt_flag=interrupt_flag,
+            force_stream_mode=force_stream_mode,
             session_id=session_id,
         )
         response = execution_result.api_response
@@ -486,6 +497,7 @@ class LLMOrchestrator:
         raise_when_empty: bool = True,
         interrupt_flag: asyncio.Event | None = None,
         session_id: str = "",
+        force_stream_mode: bool = False,
     ) -> LLMResponseResult:
         """基于外部消息工厂异步生成响应。
 
@@ -497,6 +509,7 @@ class LLMOrchestrator:
             response_format: 响应格式约束。
             raise_when_empty: 保留字段，当前版本暂未单独使用。
             interrupt_flag: 外部中断标记；被设置时会尽快终止请求。
+            force_stream_mode: 仅为当前请求强制流式，不修改共享模型配置。
 
         Returns:
             LLMResponseResult: 统一文本响应结果对象。
@@ -516,6 +529,7 @@ class LLMOrchestrator:
             tool_options=tool_built,
             response_format=response_format,
             interrupt_flag=interrupt_flag,
+            force_stream_mode=force_stream_mode,
             session_id=session_id,
         )
         response = execution_result.api_response
@@ -540,6 +554,29 @@ class LLMOrchestrator:
             response,
             model_info.name,
         )
+
+    async def generate_response_from_snapshot_async(self, snapshot: ResponseRequest) -> LLMResponseResult:
+        """固定实际模型与输入执行派生请求，保留统一重试、超时和用量统计。"""
+        self._refresh_task_config()
+        request = await asyncio.to_thread(snapshot.detached_snapshot)
+        request.trace_context = RequestTraceContext(
+            task_name=self.task_name, request_type=self.request_type, session_id=self.session_id,
+        )
+        request.logical_turn_id = uuid.uuid4().hex
+        model_info = request.model_info
+        api_provider = TempMethodsLLMUtils.get_provider_by_name(model_info.api_provider)
+        client = await client_registry.get_client_class_instance_async(api_provider)
+        started = time.time()
+        response = await self._attempt_request_on_model_with_timeout(api_provider, client, request, model_info.name)
+        if response.usage is not None:
+            await asyncio.to_thread(
+                llm_usage_recorder.record_usage_to_database,
+                request_started_at=datetime.fromtimestamp(request.trace_context.current_attempt_started_at),
+                model_info=model_info, model_usage=response.usage, user_id="system",
+                request_type=self.request_type, task_name=self.task_name, session_id=self.session_id,
+                time_cost=time.time() - started,
+            )
+        return self._build_generation_result(response, model_info.name)
 
     async def get_embedding(self, embedding_input: str, *, session_id: str = "") -> LLMEmbeddingResult:
         """获取嵌入向量。
@@ -570,7 +607,7 @@ class LLMOrchestrator:
                 request_type=self.request_type,
                 task_name=self.task_name,
                 session_id=self._resolve_effective_session_id(session_id),
-                time_cost=time.time() - start_time,
+                time_cost=max(0.0, time.time() - start_time - response.rate_limit_wait_seconds),
             )
         if not embedding:
             raise RuntimeError("获取embedding失败")
@@ -879,7 +916,7 @@ class LLMOrchestrator:
             )
         raise ValueError(f"不支持的请求类型: {request_type}")
 
-    def _select_model(
+    async def _select_model(
         self,
         exclude_models: Optional[Set[str]] = None,
         model_name: Optional[str] = None,
@@ -911,8 +948,6 @@ class LLMOrchestrator:
 
         if not available_models:
             raise RuntimeError("没有可用的模型可供选择。所有模型均已尝试失败。")
-
-        ensure_configured_clients_loaded()
 
         if self.task_name in EMBEDDING_TASK_NAMES:
             # 嵌入模型的向量空间必须保持一致，多模型间随机或均衡切换会污染向量库，
@@ -947,9 +982,15 @@ class LLMOrchestrator:
 
         model_info = TempMethodsLLMUtils.get_model_info_by_name(selected_model_name)
         api_provider = TempMethodsLLMUtils.get_provider_by_name(model_info.api_provider)
-        client = client_registry.get_client_class_instance(api_provider)
-        logger.debug(f"选择请求模型: {model_info.name} (策略: {strategy})")
+        # 初始化现在会让出循环，先占用名额，避免冷启动的并发请求全部选中同一模型。
         self._adjust_model_usage(model_info.name, usage_penalty_delta=1)
+        try:
+            client = await client_registry.get_client_class_instance_async(api_provider)
+        except BaseException:
+            # 初始化失败或请求取消时，尚未发送请求，必须归还模型选择名额。
+            self._adjust_model_usage(model_info.name, usage_penalty_delta=-1)
+            raise
+        logger.debug(f"选择请求模型: {model_info.name} (策略: {strategy})")
         return model_info, api_provider, client
 
     def _record_success_generation_attempt(
@@ -1018,13 +1059,16 @@ class LLMOrchestrator:
         model_info = request.model_info
         original_response_request = request if isinstance(request, ResponseRequest) else None
         active_request: ClientRequest = request
+        if isinstance(active_request, EmbeddingRequest):
+            active_request.retry_handled_externally = True
 
-        def ensure_attempt_snapshot(error: Exception) -> None:
+        async def ensure_attempt_snapshot(error: Exception) -> None:
             """确保内置或插件 Provider 的每次失败都有统一快照记录。"""
 
             if has_request_snapshot(error):
                 return
-            snapshot_path = save_failed_request_snapshot(
+            snapshot_path = await asyncio.to_thread(
+                save_failed_request_snapshot,
                 api_provider=api_provider,
                 client_type=api_provider.client_type,
                 error=error,
@@ -1042,23 +1086,31 @@ class LLMOrchestrator:
                 active_request.trace_context.model_attempt += 1
                 active_request.trace_context.current_attempt_started_at = time.time()
             try:
-                if isinstance(active_request, ResponseRequest):
-                    response = await client.get_response(active_request)
-                elif isinstance(active_request, EmbeddingRequest):
-                    response = await client.get_embedding(active_request)
-                elif isinstance(active_request, ImageEmbeddingRequest):
-                    response = await client.get_image_embedding(active_request)
-                else:
-                    response = await client.get_audio_transcriptions(active_request)
+                async with track_model_task_usage(
+                    self.task_name, model_info.name, model_info.model_identifier, api_provider.name,
+                ):
+                    if isinstance(active_request, ResponseRequest):
+                        response = await client.get_response(active_request)
+                    elif isinstance(active_request, EmbeddingRequest):
+                        response = await client.get_embedding(active_request)
+                    elif isinstance(active_request, ImageEmbeddingRequest):
+                        response = await client.get_image_embedding(active_request)
+                    else:
+                        response = await client.get_audio_transcriptions(active_request)
                 self._record_success_generation_attempt(
                     api_provider=api_provider,
                     request=active_request,
                     response=response,
                 )
-                mark_request_succeeded(active_request, response)
+                await asyncio.to_thread(mark_request_succeeded, active_request, response)
+                if isinstance(active_request, ResponseRequest) and self.request_type in {
+                    "maisaka.planner", "maisaka.context_compaction",
+                }:
+                    # 包括图片重试后的实际输入；禁止用初始请求冒充最终成功请求。
+                    response.request_snapshot = await asyncio.to_thread(active_request.detached_snapshot)
                 return response
             except EmptyResponseException as e:
-                ensure_attempt_snapshot(e)
+                await ensure_attempt_snapshot(e)
                 # 空回复：通常为临时问题，单独记录并重试
                 original_error_info = self._get_original_error_info(e)
                 retry_remain -= 1
@@ -1079,11 +1131,11 @@ class LLMOrchestrator:
                     reason="模型返回空回复",
                     retry_interval=api_provider.retry_interval,
                 )
-                update_failed_request_attempt(e, status="retrying", retry_interval=api_provider.retry_interval)
+                await asyncio.to_thread(update_failed_request_attempt, e, status="retrying", retry_interval=api_provider.retry_interval)
                 await asyncio.sleep(api_provider.retry_interval)
 
             except NetworkConnectionError as e:
-                ensure_attempt_snapshot(e)
+                await ensure_attempt_snapshot(e)
                 # 网络错误：单独记录并重试
                 # 尝试从链式异常中获取原始错误信息以诊断具体原因
                 original_error_info = self._get_original_error_info(e)
@@ -1128,11 +1180,11 @@ class LLMOrchestrator:
                     reason="网络错误",
                     retry_interval=api_provider.retry_interval,
                 )
-                update_failed_request_attempt(e, status="retrying", retry_interval=api_provider.retry_interval)
+                await asyncio.to_thread(update_failed_request_attempt, e, status="retrying", retry_interval=api_provider.retry_interval)
                 await asyncio.sleep(api_provider.retry_interval)
 
             except RespNotOkException as e:
-                ensure_attempt_snapshot(e)
+                await ensure_attempt_snapshot(e)
                 original_error_info = self._get_original_error_info(e)
                 task_display = self.request_type or "未知任务"
 
@@ -1160,7 +1212,7 @@ class LLMOrchestrator:
                         reason=f"HTTP {e.status_code}",
                         retry_interval=api_provider.retry_interval,
                     )
-                    update_failed_request_attempt(e, status="retrying", retry_interval=api_provider.retry_interval)
+                    await asyncio.to_thread(update_failed_request_attempt, e, status="retrying", retry_interval=api_provider.retry_interval)
                     await asyncio.sleep(api_provider.retry_interval)
                     continue
 
@@ -1177,7 +1229,7 @@ class LLMOrchestrator:
                         img_target_size=target_size,
                     )
                     active_request = active_request.copy_with(context_items=compressed_messages)
-                    update_failed_request_attempt(e, status="retrying")
+                    await asyncio.to_thread(update_failed_request_attempt, e, status="retrying")
                     continue
 
                 if e.status_code == 413 and can_retry_with_compression:
@@ -1187,7 +1239,7 @@ class LLMOrchestrator:
                     # 压缩消息本身不消耗重试次数
                     compressed_messages = compress_messages(active_request.context_items)
                     active_request = active_request.copy_with(context_items=compressed_messages)
-                    update_failed_request_attempt(e, status="retrying")
+                    await asyncio.to_thread(update_failed_request_attempt, e, status="retrying")
                     continue
 
                 # 不可重试的HTTP错误
@@ -1197,7 +1249,7 @@ class LLMOrchestrator:
                 raise ModelAttemptFailed(f"模型 '{model_info.name}' 遇到硬错误", original_exception=e) from e
 
             except RespParseException as e:
-                ensure_attempt_snapshot(e)
+                await ensure_attempt_snapshot(e)
                 original_error_info = self._get_original_error_info(e)
                 retry_remain -= 1
                 task_display = self.request_type or "未知任务"
@@ -1218,14 +1270,14 @@ class LLMOrchestrator:
                     reason="响应解析失败",
                     retry_interval=api_provider.retry_interval,
                 )
-                update_failed_request_attempt(e, status="retrying", retry_interval=api_provider.retry_interval)
+                await asyncio.to_thread(update_failed_request_attempt, e, status="retrying", retry_interval=api_provider.retry_interval)
                 await asyncio.sleep(api_provider.retry_interval)
 
             except ReqAbortException:
                 raise
 
             except Exception as e:
-                ensure_attempt_snapshot(e)
+                await ensure_attempt_snapshot(e)
                 logger.error(traceback.format_exc())
 
                 original_error_info = self._get_original_error_info(e)
@@ -1267,7 +1319,8 @@ class LLMOrchestrator:
                 model_name=model_name,
                 timeout_s=timeout_s,
             )
-            snapshot_path = save_failed_request_snapshot(
+            snapshot_path = await asyncio.to_thread(
+                save_failed_request_snapshot,
                 api_provider=api_provider,
                 client_type=api_provider.client_type,
                 error=timeout_error,
@@ -1298,6 +1351,7 @@ class LLMOrchestrator:
         audio_base64: str | None = None,
         interrupt_flag: asyncio.Event | None = None,
         session_id: str = "",
+        force_stream_mode: bool = False,
     ) -> LLMExecutionResult:
         """执行一次完整的模型调度请求。
 
@@ -1313,6 +1367,7 @@ class LLMOrchestrator:
             embedding_input: 嵌入输入文本。
             audio_base64: Base64 编码的音频数据。
             interrupt_flag: 外部中断标记。
+            force_stream_mode: 仅为当前响应请求强制流式。
 
         Returns:
             LLMExecutionResult: 单次模型执行结果对象。
@@ -1328,24 +1383,30 @@ class LLMOrchestrator:
         )
 
         for model_index in range(max_attempts):
-            model_info, api_provider, client = self._select_model(
+            model_info, api_provider, client = await self._select_model(
                 exclude_models=failed_models_this_request,
                 model_name=model_name,
             )
+            if request_type == RequestType.RESPONSE and force_stream_mode:
+                # 请求级副本也覆盖重试及候选模型切换，避免改变其他任务的流式设置。
+                model_info = model_info.model_copy(update={"force_stream_mode": True})
             last_model_name = model_info.name
             trace_context.model_attempt = 0
             context_items: List[ContextItem] = []
-            if context_factory:
-                parameter_count = len(inspect.signature(context_factory).parameters)
-                if parameter_count >= 2:
-                    context_result = context_factory(client, model_info)
-                else:
-                    context_result = context_factory(client)
-                if inspect.isawaitable(context_result):
-                    context_items = await context_result
-                else:
-                    context_items = context_result
             try:
+                if context_factory:
+                    parameter_count = len(inspect.signature(context_factory).parameters)
+                    if parameter_count >= 2:
+                        context_result = context_factory(client, model_info)
+                    else:
+                        context_result = context_factory(client)
+                    if inspect.isawaitable(context_result):
+                        context_items = await context_result
+                    else:
+                        context_items = context_result
+                if request_type == RequestType.RESPONSE and context_items:
+                    # 图片解码、缩放及切图在线程池执行，避免阻塞 Bot 或 WebUI 事件循环。
+                    context_items = await asyncio.to_thread(normalize_context_images, context_items)
                 request = self._build_client_request(
                     request_type=request_type,
                     model_info=model_info,
@@ -1385,7 +1446,7 @@ class LLMOrchestrator:
                     request_started_at=datetime.fromtimestamp(trace_context.current_attempt_started_at),
                 )
 
-            except ReqAbortException as e:
+            except (ReqAbortException, asyncio.CancelledError) as e:
                 self._adjust_model_usage(model_info.name, usage_penalty_delta=-1)
                 if self.request_type.startswith("maisaka."):
                     logger.debug(
@@ -1396,7 +1457,8 @@ class LLMOrchestrator:
             except ModelAttemptFailed as e:
                 last_exception = e.original_exception or e
                 if not has_request_snapshot(last_exception):
-                    snapshot_path = save_failed_request_snapshot(
+                    snapshot_path = await asyncio.to_thread(
+                        save_failed_request_snapshot,
                         api_provider=api_provider,
                         client_type=api_provider.client_type,
                         error=last_exception,
@@ -1411,7 +1473,7 @@ class LLMOrchestrator:
                 self._adjust_model_usage(model_info.name, penalty_delta=1, usage_penalty_delta=-1)
                 failed_models_this_request.add(model_info.name)
                 if model_index < max_attempts - 1:
-                    update_failed_request_attempt(last_exception, status="switching_model")
+                    await asyncio.to_thread(update_failed_request_attempt, last_exception, status="switching_model")
 
                 if isinstance(last_exception, RespNotOkException) and last_exception.status_code == 400:
                     logger.warning("收到客户端错误 (400)，跳过当前模型并继续尝试其他模型。")
@@ -1419,7 +1481,7 @@ class LLMOrchestrator:
 
         logger.error(f"所有 {max_attempts} 个模型均尝试失败。")
         if last_exception:
-            mark_request_final_failure(last_exception)
+            await asyncio.to_thread(mark_request_final_failure, last_exception)
             self._schedule_llm_error_event(
                 model_name=last_model_name,
                 message=str(last_exception),

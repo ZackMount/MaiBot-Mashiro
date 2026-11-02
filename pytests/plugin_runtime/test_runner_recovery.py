@@ -8,9 +8,12 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Deque, Dict, List
+from types import SimpleNamespace
+from typing import Any, Deque, Dict, List, Optional
+from unittest.mock import AsyncMock
 
 import asyncio
+import os
 
 import pytest
 
@@ -32,6 +35,19 @@ from src.plugin_runtime.protocol.errors import ErrorCode, RPCError
 _QQ = "gateway.qq"
 _IRC = "gateway.irc"
 _EXTENSION = "feature.demo"
+
+
+@pytest.mark.asyncio
+async def test_runner_respawn_keeps_host_identity(monkeypatch):
+    monkeypatch.setenv("MAIBOT_HOST_PID", "1")
+    spawn = AsyncMock(return_value=SimpleNamespace(pid=4242, returncode=None, stderr=None))
+    monkeypatch.setattr(supervisor_module.asyncio, "create_subprocess_exec", spawn)
+    supervisor = PluginRunnerSupervisor(plugin_dirs=[])
+    await supervisor._spawn_runner()
+    supervisor._runner_process = None
+    await supervisor._spawn_runner()
+    assert spawn.await_count == 2
+    assert all(call.kwargs["env"]["MAIBOT_HOST_PID"] == str(os.getpid()) for call in spawn.await_args_list)
 
 
 def _request(method: str, payload: Dict[str, Any]) -> Envelope:
@@ -166,6 +182,22 @@ def runtime(monkeypatch):
     supervisor._running = True
     supervisor._runner_process = _Process()
     return supervisor, boundary
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("configured, override", [(0, None), (3, 0)])
+async def test_zero_restart_budget_disables_process_recovery(monkeypatch, configured: int, override: Optional[int]) -> None:
+    monkeypatch.setattr(supervisor_module.global_config.plugin_runtime, "max_restart_attempts", configured)
+    monkeypatch.setattr(supervisor_module, "is_shutdown_requested", lambda: False)
+    supervisor = PluginRunnerSupervisor(max_restart_attempts=override)
+    supervisor._running = True
+    spawn = AsyncMock(side_effect=AssertionError("zero restart budget must not spawn a runner"))
+    monkeypatch.setattr(supervisor, "_spawn_runner", spawn)
+    monkeypatch.setattr(supervisor, "_shutdown_runner", AsyncMock())
+
+    assert await supervisor._restart_runner("runner_process_exited") is False
+    spawn.assert_not_awaited()
+    assert supervisor._restart_count == 0
 
 
 async def _seed_loaded(supervisor: PluginRunnerSupervisor, plugin_ids: List[str]) -> None:

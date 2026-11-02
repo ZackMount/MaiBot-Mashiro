@@ -6,7 +6,7 @@
  */
 import { ApiError, backendApi } from '@/lib/http'
 
-import type { InstalledPlugin, LegacyInstalledPlugin } from './types'
+import type { InstalledPlugin } from './types'
 
 const INSTALLED_PLUGINS_CACHE_TTL = 1500
 
@@ -16,29 +16,23 @@ let installedPluginsRequest: Promise<InstalledPlugin[]> | null = null
 /**
  * 获取已安装插件列表
  *
- * 保持原有行为：HTTP 错误 / 响应解析失败 / 业务级失败都返回空列表而不是错误；
- * 网络层失败与认证失效（401）仍向上抛出。
+ * 请求失败向上抛出，只有成功读取的列表才会进入缓存。
  */
 async function fetchInstalledPluginsUncached(): Promise<InstalledPlugin[]> {
-  let data: { success: boolean; plugins?: InstalledPlugin[]; message?: string }
-  try {
-    data = await backendApi.get<{
-      success: boolean
-      plugins?: InstalledPlugin[]
-      message?: string
-    }>('/api/webui/plugins/installed', { errorMessage: '获取已安装插件列表失败' })
-  } catch (error) {
-    if (error instanceof ApiError && error.status !== undefined && error.status !== 401) {
-      return []
-    }
-    throw error
-  }
+  const data = await backendApi.get<{
+    success: boolean
+    plugins?: InstalledPlugin[]
+    message?: string
+  }>('/api/webui/plugins/installed', { errorMessage: '获取已安装插件列表失败' })
 
   if (!data.success) {
-    return []
+    throw new ApiError(data.message || '获取已安装插件列表失败', { detail: data })
+  }
+  if (!Array.isArray(data.plugins)) {
+    throw new ApiError('已安装插件列表响应缺少有效的 plugins 数组', { detail: data })
   }
 
-  return data.plugins || []
+  return data.plugins
 }
 
 export async function getInstalledPlugins(
@@ -66,36 +60,12 @@ export async function getInstalledPlugins(
   return installedPluginsRequest
 }
 
-/**
- * 获取本地已安装插件 README。
- */
-export async function getLocalPluginReadme(pluginId: string): Promise<string> {
-  const data = await backendApi.get<{ success: boolean; data?: string; error?: string }>(
-    `/api/webui/plugins/local-readme/${encodeURIComponent(pluginId)}`,
-    { errorMessage: '获取 README 失败' }
+/** 读取后端累计运行时长；此接口不重新扫描插件目录。 */
+export async function getPluginUsageSeconds(): Promise<Record<string, number>> {
+  const data = await backendApi.get<{ usage_seconds: Record<string, number> }>(
+    '/api/webui/plugins/usage', { errorMessage: '获取插件运行时长失败' }
   )
-
-  if (!data.success) {
-    return ''
-  }
-
-  return data.data || ''
-}
-
-/**
- * 获取本地已安装插件更新日志。
- */
-export async function getLocalPluginChangelog(pluginId: string): Promise<string> {
-  const data = await backendApi.get<{ success: boolean; data?: string; error?: string }>(
-    `/api/webui/plugins/local-changelog/${encodeURIComponent(pluginId)}`,
-    { errorMessage: '获取更新日志失败' }
-  )
-
-  if (!data.success) {
-    return ''
-  }
-
-  return data.data || ''
+  return data.usage_seconds
 }
 
 /**
@@ -113,18 +83,7 @@ export function checkPluginInstalled(
  */
 export function getInstalledPluginVersion(
   pluginId: string,
-  installedPlugins: (InstalledPlugin | LegacyInstalledPlugin)[]
+  installedPlugins: InstalledPlugin[]
 ): string | undefined {
-  const plugin = installedPlugins.find((p) => p.id === pluginId)
-  if (!plugin) return undefined
-
-  // 兼容两种格式：新格式有 manifest，旧格式直接有 version
-  if ('manifest' in plugin && plugin.manifest) {
-    return plugin.manifest.version
-  }
-  // 旧版本格式
-  if ('version' in plugin) {
-    return plugin.version
-  }
-  return undefined
+  return installedPlugins.find((plugin) => plugin.id === pluginId)?.manifest.version
 }

@@ -1,7 +1,11 @@
 from typing import TYPE_CHECKING
 
 from src.common.logger import get_logger
+from src.files.capability import file_capability
 from src.plugin_runtime.host.capability_service import CapabilityImpl
+from src.plugin_runtime.upload_store import claim_upload
+
+from . import desktop_pet, internal_chat, market, personality, web
 
 if TYPE_CHECKING:
     from src.plugin_runtime.host.supervisor import PluginSupervisor
@@ -13,6 +17,17 @@ logger = get_logger("plugin_runtime.integration")
 def register_capability_impls(manager: "PluginRuntimeManager", supervisor: "PluginSupervisor") -> None:
     """向指定 Supervisor 注册主程序提供的能力实现。"""
     cap_service = supervisor.capability_service
+    cap_service.register_capability("webui.claim_upload", claim_upload)
+    cap_service.register_capability("internal_chat.identity", internal_chat.identity)
+    cap_service.register_capability("internal_chat.send", internal_chat.send)
+    for action in ("list", "get_current", "switch"):
+        cap_service.register_capability(f"personality.{action}", personality.handle)
+    for action in ("status", "show", "hide", "say", "set_thinking", "refresh_buttons"):
+        cap_service.register_capability(f"desktop_pet.{action}", desktop_pet.control)
+    for action in desktop_pet.ANIMATION_ACTIONS:
+        cap_service.register_capability(f"desktop_pet.{action}", desktop_pet.animation)
+    for name in ("files.list", "files.read_text", "files.download", "files.upload", "files.send"):
+        cap_service.register_capability(name, file_capability)
 
     def _register(name: str, impl: CapabilityImpl) -> None:
         """注册单个能力实现。
@@ -63,7 +78,9 @@ def register_capability_impls(manager: "PluginRuntimeManager", supervisor: "Plug
     _register("message.build_readable", manager._cap_message_build_readable)
 
     _register("maisaka.context.append", manager._cap_maisaka_context_append)
+    _register("maisaka.context.resolve_image", manager._cap_maisaka_context_resolve_image)
     _register("maisaka.proactive.trigger", manager._cap_maisaka_proactive_trigger)
+    _register("maisaka.reply.generate", manager._cap_maisaka_reply_generate)
 
     _register("person.get_id", manager._cap_person_get_id)
     _register("person.get_value", manager._cap_person_get_value)
@@ -102,6 +119,11 @@ def register_capability_impls(manager: "PluginRuntimeManager", supervisor: "Plug
     _register("component.reload_plugin", manager._cap_component_reload_plugin)
 
     _register("knowledge.search", manager._cap_knowledge_search)
+    _register("market.search", market.search)
+    _register("market.get_detail", market.get_detail)
+    _register("market.get_readme", market.get_readme)
+    _register("web.search", web.call)
+    _register("web.fetch", web.call)
     _register("statistics.local.models", manager._cap_statistics_local_models)
     _register("statistics.local.model_trend", manager._cap_statistics_local_model_trend)
     _register("statistics.local.token_trend", manager._cap_statistics_local_token_trend)

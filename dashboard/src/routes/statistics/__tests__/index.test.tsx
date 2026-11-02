@@ -84,6 +84,7 @@ vi.mock('@/lib/http', () => ({ backendApi: { get: httpMocks.get } }))
 
 const breakdown: DetailedStatisticsBreakdown = {
   name: 'model-a',
+  is_embedding: false,
   request_count: 2,
   input_tokens: 20,
   output_tokens: 10,
@@ -101,6 +102,7 @@ const breakdown: DetailedStatisticsBreakdown = {
 
 const abnormalBreakdown: DetailedStatisticsBreakdown = {
   name: 'broken-model',
+  is_embedding: false,
   request_count: 0,
   input_tokens: 0,
   output_tokens: 0,
@@ -140,6 +142,11 @@ function makeSummary(overrides: Partial<DetailedStatisticsSummary> = {}): Detail
 
 function makeEmptyDistributions(): DetailedStatisticsDistributions {
   return {
+    owner_tokens: [],
+    model_tokens: [],
+    module_tokens: [],
+    request_type_tokens: [],
+    chat_tokens: [],
     owner_costs: [],
     model_costs: [],
     module_costs: [],
@@ -161,6 +168,11 @@ function makePeriod(overrides: Partial<DetailedStatisticsPeriod> = {}): Detailed
     request_types: [{ ...breakdown, name: 'replyer.chat' }],
     chats: [{ name: '测试群聊', message_count: 10 }],
     distributions: {
+      owner_tokens: [],
+      model_tokens: [],
+      module_tokens: [],
+      request_type_tokens: [],
+      chat_tokens: [],
       owner_costs: [{ name: '本体', value: 0.3 }],
       model_costs: [{ name: 'model-a', value: 0.3 }],
       module_costs: [{ name: 'replyer', value: 0.3 }],

@@ -5,11 +5,12 @@ MaiSaka - MCP 管理器
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Callable, List, Optional
 
 import asyncio
 
 from src.cli.console import console
+from src.common.startup_diagnostics import diagnostic_stage
 from src.core.tooling import (
     ToolExecutionResult,
     ToolInvocation,
@@ -22,7 +23,6 @@ from .config import (
     build_mcp_client_runtime_config,
     build_mcp_server_runtime_configs,
 )
-from .connection import MCPConnection, MCP_AVAILABLE
 from .hooks import MCPHostCallbacks
 from .models import (
     MCPPromptResult,
@@ -40,7 +40,11 @@ from .models import (
 if TYPE_CHECKING:
     from src.config.official_configs import MCPConfig
 
-# 内置工具名称集合 —— MCP 工具不允许与这些名称冲突
+# 连接层加载包含 SDK 子阶段，两者属于嵌套墙钟耗时，不能相加。
+with diagnostic_stage("mcp.import_connection"):
+    from .connection import MCPConnection, MCP_AVAILABLE
+
+# 旧 OpenAI 工具列表保留的内置名称；统一工具注册表通过来源前缀保留重名 MCP 工具。
 BUILTIN_TOOL_NAMES = frozenset(
     {
         "reply",
@@ -139,6 +143,7 @@ class MCPManager:
         """
 
         self._server_configs = {config.name: config for config in configs}
+        pending_connections: List[MCPConnection] = []
 
         async def connect_one(config: MCPServerRuntimeConfig) -> tuple[MCPServerRuntimeConfig, MCPConnection, bool]:
             """并行建立一个服务连接，但保持后续注册顺序稳定。"""
@@ -149,6 +154,7 @@ class MCPManager:
                 self._host_callbacks,
                 discover_extended_features=self._discover_extended_features,
             )
+            pending_connections.append(connection)
             connect_timeout_seconds = (
                 min(60.0, max(5.0, config.http_timeout_seconds + 5.0))
                 if config.transport != "stdio"
@@ -165,7 +171,13 @@ class MCPManager:
                 success = False
             return config, connection, success
 
-        connection_results = await asyncio.gather(*(connect_one(config) for config in configs))
+        try:
+            connection_results = await asyncio.gather(*(connect_one(config) for config in configs))
+        except BaseException:
+            # 建连批次被取消时，已成功的连接尚未注册，但其持有任务仍在运行。
+            # 必须连同仍在建连的连接一起关闭，再传播原始异常。
+            await asyncio.shield(asyncio.gather(*(connection.close() for connection in pending_connections)))
+            raise
         for config, connection, success in connection_results:
             if not success:
                 self._connection_errors[config.name] = connection.last_error or "连接失败"
@@ -183,6 +195,14 @@ class MCPManager:
                 f"资源 {registered_resource_count} / 模板 {registered_template_count})[/muted]"
             )
 
+    def add_status_change_callback(self, callback: Callable[[], None]) -> None:
+        """在连接持有任务结束后通知订阅者刷新状态；须在管理器建连完成后调用。"""
+
+        for connection in self._connections.values():
+            task = connection._lifecycle_task
+            if task is not None:
+                task.add_done_callback(lambda _task: callback())
+
     def get_status_snapshot(self) -> dict[str, Any]:
         """返回可跨线程读取的纯数据连接状态快照。"""
 
@@ -196,13 +216,17 @@ class MCPManager:
                     "connected": connection is not None and connection.session is not None,
                     "protocol_version": connection.protocol_version if connection is not None else "",
                     "tool_count": len(connection.tools) if connection is not None else 0,
-                    "error": self._connection_errors.get(server_name, ""),
+                    "error": (
+                        connection.last_error
+                        if connection is not None
+                        else self._connection_errors.get(server_name, "")
+                    ),
                 }
             )
         return {
             "initialized": True,
             "server_count": len(self._connections),
-            "tool_count": len(self._tool_to_server),
+            "tool_count": self.tool_count,
             "servers": servers,
         }
 
@@ -221,20 +245,8 @@ class MCPManager:
         for tool in connection.tools:
             tool_name = str(tool.name)
 
-            if tool_name in BUILTIN_TOOL_NAMES:
-                console.print(
-                    f"[warning]⚠️ MCP 工具 '{tool_name}' (来自 {server_name}) 与内置工具冲突，已跳过[/warning]"
-                )
-                continue
-
-            if tool_name in self._tool_to_server:
-                existing_server = self._tool_to_server[tool_name]
-                console.print(
-                    f"[warning]⚠️ MCP 工具 '{tool_name}' (来自 {server_name}) 与 {existing_server} 冲突，已跳过[/warning]"
-                )
-                continue
-
-            self._tool_to_server[tool_name] = server_name
+            # 保留所有服务器的工具；裸名称兼容旧调用，统一注册表给重名项添加来源前缀。
+            self._tool_to_server.setdefault(tool_name, server_name)
             registered_count += 1
         return registered_count
 
@@ -354,9 +366,6 @@ class MCPManager:
         tool_specs: list[ToolSpec] = []
         for server_name, connection in self._connections.items():
             for tool in connection.tools:
-                if self._tool_to_server.get(tool.name) != server_name:
-                    continue
-
                 parameters_schema = self._build_tool_parameters_schema(tool)
                 output_schema = self._build_tool_output_schema(tool)
                 description = str(tool.description or f"来自 {server_name} 的 MCP 工具").strip()
@@ -371,7 +380,7 @@ class MCPManager:
                         provider_type="mcp",
                         icons=[build_tool_icon(item) for item in getattr(tool, "icons", []) or []],
                         annotation=build_tool_annotation(getattr(tool, "annotations", None)),
-                        metadata={"server_name": server_name} | (getattr(tool, "meta", {}) or {}),
+                        metadata=(getattr(tool, "meta", {}) or {}) | {"server_name": server_name},
                     )
                 )
         return tool_specs
@@ -438,6 +447,8 @@ class MCPManager:
                 },
             }
             for tool_spec in self.get_tool_specs()
+            if tool_spec.name not in BUILTIN_TOOL_NAMES
+            and self._tool_to_server.get(tool_spec.name) == tool_spec.metadata["server_name"]
         ]
 
     def is_mcp_tool(self, tool_name: str) -> bool:
@@ -487,7 +498,7 @@ class MCPManager:
         """
 
         tool_name = invocation.tool_name
-        server_name = self._tool_to_server.get(tool_name)
+        server_name = invocation.metadata.get("mcp_server_name") or self._tool_to_server.get(tool_name)
         if not server_name or server_name not in self._connections:
             return ToolExecutionResult(
                 tool_name=tool_name,
@@ -496,6 +507,12 @@ class MCPManager:
             )
 
         connection = self._connections[server_name]
+        if not any(tool.name == tool_name for tool in connection.tools):
+            return ToolExecutionResult(
+                tool_name=tool_name,
+                success=False,
+                error_message=f"MCP 服务器 '{server_name}' 未提供工具 '{tool_name}'",
+            )
         return await connection.call_tool(tool_name, invocation.arguments)
 
     async def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> str:
@@ -565,11 +582,7 @@ class MCPManager:
 
         parts: list[str] = []
         for server_name, connection in self._connections.items():
-            tool_names = [
-                str(tool.name)
-                for tool in connection.tools
-                if self._tool_to_server.get(tool.name) == server_name
-            ]
+            tool_names = [str(tool.name) for tool in connection.tools]
             if tool_names:
                 parts.append(f"  • {server_name}: {', '.join(tool_names)}")
         return "\n".join(parts)
@@ -583,7 +596,7 @@ class MCPManager:
 
         parts: list[str] = []
         for server_name, connection in self._connections.items():
-            tool_count = sum(1 for tool in connection.tools if self._tool_to_server.get(tool.name) == server_name)
+            tool_count = len(connection.tools)
             prompt_count = sum(
                 1 for prompt in connection.prompts if self._prompt_to_server.get(prompt.name) == server_name
             )
@@ -619,7 +632,7 @@ class MCPManager:
             int: 工具数量。
         """
 
-        return len(self._tool_to_server)
+        return sum(len(connection.tools) for connection in self._connections.values())
 
     @property
     def prompt_count(self) -> int:

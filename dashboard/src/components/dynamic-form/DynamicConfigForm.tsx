@@ -1,5 +1,4 @@
-import { Link } from '@tanstack/react-router'
-import { ChevronDown, ChevronUp, Sparkles } from 'lucide-react'
+import { ChevronDown, ChevronUp } from 'lucide-react'
 import * as React from 'react'
 
 import { Button } from '@/components/ui/button'
@@ -88,27 +87,6 @@ export function AdvancedSettingsButton({
   )
 }
 
-function PromptGeneratorEntryCard() {
-  return (
-    <Link
-      to="/config/prompt-generator"
-      className="group flex items-start gap-3 rounded-lg border bg-muted/20 p-3 text-left transition-colors hover:bg-muted/40"
-    >
-      <span className="mt-0.5 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border bg-background text-primary">
-        <Sparkles className="h-4 w-4" aria-hidden="true" />
-      </span>
-      <span className="min-w-0 space-y-1">
-        <span className="block text-sm font-semibold text-foreground group-hover:text-primary">
-          人设生成器（测试版）
-        </span>
-        <span className="block text-xs leading-5 text-muted-foreground">
-          根据人格设定生成或调整麦麦的人设描述。
-        </span>
-      </span>
-    </Link>
-  )
-}
-
 function DynamicConfigSection({
   leadingContent,
   trailingContent,
@@ -192,7 +170,6 @@ function DynamicConfigSection({
                 sectionColumns={1}
                 fieldTrailingContent={fieldTrailingContent}
               />
-              {sectionKey === 'personality' && <PromptGeneratorEntryCard />}
               {trailingContent}
             </div>
           )}
@@ -494,6 +471,8 @@ export const DynamicConfigForm: React.FC<DynamicConfigFormProps> = ({
                   ? "grid-cols-[minmax(0,1fr)_auto]"
                   : isVisualImageCompressionRow
                   ? "grid-cols-[minmax(0,0.8fr)_minmax(0,1fr)_minmax(0,1.1fr)] items-center"
+                  : rowKey === 'chat-quote-frequency'
+                  ? "md:grid-cols-2"
                   : "md:grid-cols-2 xl:grid-cols-3",
               )}
             >
@@ -520,11 +499,23 @@ export const DynamicConfigForm: React.FC<DynamicConfigFormProps> = ({
     </>
   )
 
+  const isFullWidthControlRow = (row: FieldSchema[]) => {
+    if (row.length !== 1) return false
+    const field = row[0]
+    return field['x-layout'] !== 'inline-right' &&
+      ['input', 'number', 'password', 'select', 'textarea', undefined].includes(field['x-widget']) &&
+      ['string', 'number', 'integer', 'select', 'textarea'].includes(field.type)
+  }
+
   const renderFieldList = (fields: FieldSchema[]) => (
     <>
-      {groupFieldsByRow(fields).map((row, index) => (
+      {groupFieldsByRow(fields).map((row, index, rows) => (
         <React.Fragment key={row.map((field) => field.name).join('|')}>
-          {index > 0 && <Separator className="my-1.5 bg-border/50" />}
+          {index > 0 && basePath !== 'personality' && (
+            isFullWidthControlRow(rows[index - 1]) && isFullWidthControlRow(row)
+              ? <div className="h-3" aria-hidden="true" />
+              : <Separator className="my-1.5 bg-border/50" />
+          )}
           {renderRows([row])}
           {row.map((field) => {
             const fieldPath = buildFieldPath(basePath, field.name)

@@ -36,10 +36,10 @@ def get_webui_chat_broadcaster() -> Tuple[Any, Optional[str], Optional[str]]:
     global _webui_chat_broadcaster
     if _webui_chat_broadcaster is None:
         try:
-            from src.webui.routers.chat import WEBUI_CHAT_PLATFORM, chat_manager
+            from src.webui.routers.chat import INTERNAL_CHAT_PLATFORM, chat_manager
 
             # 默认不再强制虚拟群聊；WebUI 默认走私聊频道，需要的话由调用者传入虚拟群 ID。
-            _webui_chat_broadcaster = (chat_manager, WEBUI_CHAT_PLATFORM, None)
+            _webui_chat_broadcaster = (chat_manager, INTERNAL_CHAT_PLATFORM, None)
         except ImportError:
             _webui_chat_broadcaster = (None, None, None)
     return _webui_chat_broadcaster
@@ -79,7 +79,7 @@ async def _send_message(message: SessionMessage, show_log: bool = True) -> bool:
     try:
         # 检查是否是 WebUI 平台的消息，或者是 WebUI 虚拟群的消息
         chat_manager, webui_platform, default_group_id = get_webui_chat_broadcaster()
-        is_webui_message = (platform == webui_platform) or is_webui_virtual_group(group_id)
+        is_webui_message = (platform in {"webui", webui_platform}) or is_webui_virtual_group(group_id)
 
         if is_webui_message and chat_manager is not None:
             # WebUI 聊天室消息（包括虚拟身份模式），通过 WebSocket 广播
@@ -300,36 +300,7 @@ class UniversalMessageSender:
                     raise ValueError("set_reply=True 时必须提供 reply_message_id")
                 message.raw_message.components.insert(0, ReplyComponent(reply_message_id))
 
-            # TODO: fix
-            # from src.core.event_bus import event_bus
-            # from src.chat.event_helpers import build_event_message
-            # from src.core.types import EventType
-
-            # _event_msg = build_event_message(EventType.POST_SEND_PRE_PROCESS, message=message, stream_id=chat_id)
-            # continue_flag, modified_message = await event_bus.emit(EventType.POST_SEND_PRE_PROCESS, _event_msg)
-            # if not continue_flag:
-            #     logger.info(f"[{chat_id}] 消息发送被插件取消: {str(message.message_segment)[:100]}...")
-            #     return False
-            # if modified_message:
-            #     if modified_message._modify_flags.modify_message_segments:
-            #         message.message_segment = Seg(type="seglist", data=modified_message.message_segments)
-            #     if modified_message._modify_flags.modify_plain_text:
-            #         logger.warning(f"[{chat_id}] 插件修改了消息的纯文本内容，可能导致此内容被覆盖。")
-            #         message.processed_plain_text = modified_message.plain_text
-
             await message.process()
-
-            # TODO: fix
-            # _event_msg = build_event_message(EventType.POST_SEND, message=message, stream_id=chat_id)
-            # continue_flag, modified_message = await event_bus.emit(EventType.POST_SEND, _event_msg)
-            # if not continue_flag:
-            #     logger.info(f"[{chat_id}] 消息发送被插件取消: {str(message.message_segment)[:100]}...")
-            #     return False
-            # if modified_message:
-            #     if modified_message._modify_flags.modify_message_segments:
-            #         message.message_segment = Seg(type="seglist", data=modified_message.message_segments)
-            #     if modified_message._modify_flags.modify_plain_text:
-            #         message.processed_plain_text = modified_message.plain_text
 
             if typing:
                 typing_time = calculate_typing_time(
@@ -341,17 +312,6 @@ class UniversalMessageSender:
             sent_msg = await send_prepared_message_to_platform(message, show_log=show_log)
             if not sent_msg:
                 return False
-
-            # _event_msg = build_event_message(EventType.AFTER_SEND, message=message, stream_id=chat_id)
-            # continue_flag, modified_message = await event_bus.emit(EventType.AFTER_SEND, _event_msg)
-            # if not continue_flag:
-            #     logger.info(f"[{chat_id}] 消息发送后续处理被插件取消: {str(message.message_segment)[:100]}...")
-            #     return True
-            # if modified_message:
-            #     if modified_message._modify_flags.modify_message_segments:
-            #         message.message_segment = Seg(type="seglist", data=modified_message.message_segments)
-            #     if modified_message._modify_flags.modify_plain_text:
-            #         message.processed_plain_text = modified_message.plain_text
 
             if storage_message:
                 with get_db_session() as db_session:
