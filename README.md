@@ -1,3 +1,5 @@
+> **MaiBot Mashiro fork**：定制代码维护在 `mashiro` 分支，起点为上游 `1.3.3`。升级与配置说明见 [维护说明](docs/MASHIRO_MAINTENANCE.md)。原项目文档保留如下。
+
 <a id="-双语--bilingual"></a>
 
 <div align="center">

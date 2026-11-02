@@ -1,0 +1,30 @@
+name: Mashiro regression
+
+on:
+  push:
+    branches: [mashiro]
+  pull_request:
+    branches: [mashiro]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  context-and-tools:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          python-version: "3.12"
+      - name: Install locked dependencies
+        run: uv sync --frozen --group dev
+      - name: Run synthetic context and tool regressions
+        run: >-
+          uv run --frozen pytest -q
+          pytests/mashiro
+          pytests/maisaka/test_planner_messages.py
+          pytests/maisaka/test_context_history.py
