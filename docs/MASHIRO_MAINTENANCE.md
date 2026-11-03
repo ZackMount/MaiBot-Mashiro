@@ -18,6 +18,7 @@ The server's current local settings are separate from the source repository. API
 3. Planner tool instructions and Replyer prose instructions are separated. Necessary facts can still be provided through `reply_reference`.
 4. Full timestamps and the actual triggering message, with the gap from the preceding chat message, identify the current turn. Old topics remain available as context and can be explicitly resumed. This is contextual guidance, not a fixed age-based ban on replies.
 5. Responses function definitions explicitly set `strict = false` to preserve optional attachment arguments.
+6. Queued chat messages are inserted by their actual timestamps, while tool-call/result order uses upstream's existing normalization. Planner requests ingest messages received during context preparation and carry the latest trigger into subsequent rounds, so an earlier user message cannot become a response to a later bot message.
 
 The optional profile pauses automatic expression selection without deleting learned expressions. Upstream removed the old emotion-trait setting; it is no longer part of the profile. Model selection, API keys, voice configuration, vector retrieval and reply frequency remain deployment choices.
 

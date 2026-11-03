@@ -1,10 +1,12 @@
 """回归验证引用归属、真实聊天上下文与当前轮次的边界。"""
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
+import asyncio
 import tomllib
 
 from PIL import Image
@@ -26,18 +28,28 @@ from src.llm_models.payload_content.context_item import (
     AssistantMessageItem,
     ContextImagePart,
     ContextItemBuilder,
+    ContextItemMeta,
+    ContextToolCall,
+    FunctionCallItem,
     RoleType,
     SystemMessageItem,
     UserMessageItem,
     get_item_text,
 )
 from src.maisaka.context.history import build_prefixed_message_sequence, build_session_message_visible_text
-from src.maisaka.context.messages import InternalContextMessage, ModelOutputContextMessage, SessionBackedMessage
+from src.maisaka.context.messages import (
+    InternalContextMessage,
+    ModelOutputContextMessage,
+    SessionBackedMessage,
+    ToolResultMessage,
+)
 from src.maisaka.context.planner_messages import (
     build_planner_prefix,
     build_planner_turn_anchor,
     build_planner_user_prefix_from_session_message,
 )
+from src.maisaka.reasoning_engine import CycleRuntimeState, MaisakaReasoningEngine
+from src.maisaka.runtime import MaisakaHeartFlowChatting
 from src.services.send_service import _build_processed_plain_text
 
 PROFILE_PATH = Path(__file__).resolve().parents[2] / "profiles/mashiro.toml"
@@ -210,6 +222,111 @@ def test_normal_replyer_receives_latest_ten_original_images(generator):
 def test_shared_prompt_does_not_instruct_writer_to_call_tools():
     shared = global_config.chat.reply_style.group_chat_prompt
     assert "show_emoji_list" not in shared and "attach_emoji" not in shared
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("question_second", [3, 6])
+async def test_queued_question_precedes_bot_reply_and_keeps_tool_pair(generator, question_second):
+    """补充消息无论在规划前还是工具执行中到达，都不能变成对机器人回复的追问。"""
+    video = make_message("video", "分享视频", datetime(2026, 11, 1, 12))
+    question = make_message("question", "？", datetime(2026, 11, 1, 12, 0, question_second))
+    own = chat_entry(
+        make_message("own", "像考古", datetime(2026, 11, 1, 12, 0, 7), user_id="10000", name="真白"),
+        "guided_reply",
+    )
+    call = ModelOutputContextMessage(FunctionCallItem(
+        meta=ContextItemMeta.create(logical_turn_id="turn", timestamp=datetime(2026, 11, 1, 12, 0, 5)),
+        tool_call=ContextToolCall("call", "reply", b"{}"),
+    ))
+    result = ToolResultMessage(
+        content="回复已发送", timestamp=datetime(2026, 11, 1, 12, 0, 8),
+        tool_call_id="call", logical_turn_id="turn", tool_name="reply",
+    )
+    engine = object.__new__(MaisakaReasoningEngine)
+    engine._runtime = SimpleNamespace(
+        _chat_history=[chat_entry(video), call, own, result],
+        _is_focus_mode_active_for_current_chat=lambda: False,
+    )
+
+    await engine._ingest_messages([question])
+
+    history = engine._runtime._chat_history
+    assert [message.message_id for message in history if isinstance(message, SessionBackedMessage)] == [
+        "video", "question", "own",
+    ]
+    assert history[history.index(call) + 1] is result
+    for entry in (call, result):
+        assert sum(message is entry for message in history) == 1
+    items = generator._build_request_messages(
+        chat_history=history, reply_message=question, reply_reason="", stream_id="offline-only",
+    )
+    text = "\n".join(get_item_text(item) for item in items)
+    assert text.index('msg_id="question"') < text.index('msg_id="own"')
+
+
+def test_equal_timestamp_messages_keep_arrival_order():
+    first = chat_entry(make_message("first", "第一条"))
+    second = chat_entry(make_message("second", "第二条"))
+    engine = object.__new__(MaisakaReasoningEngine)
+    engine._runtime = SimpleNamespace(_chat_history=[first])
+
+    engine._insert_chat_history_message(second)
+
+    assert engine._runtime._chat_history == [first, second]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pending_second,expected_target", [(3, "pending"), (-1, "first")])
+async def test_planner_includes_messages_received_during_context_preparation(monkeypatch, pending_second, expected_target):
+    first = make_message("first", "分享视频", datetime(2026, 11, 1, 12))
+    pending = make_message("pending", "？", first.timestamp + timedelta(seconds=pending_second))
+    runtime = object.__new__(MaisakaHeartFlowChatting)
+    runtime.session_id = "offline-only"
+    runtime.log_prefix = "[测试]"
+    runtime.message_cache = [first]
+    runtime._last_processed_index = 1
+    runtime._chat_history = [chat_entry(first)]
+    runtime._fixed_message_debouncer = SimpleNamespace(consume=lambda: None)
+    runtime._wait_for_message_quiet_period = AsyncMock()
+    runtime._mark_message_turn_unscheduled = lambda: None
+    runtime._is_focus_mode_active_for_current_chat = lambda: False
+    runtime._update_stage_status = lambda *args, **kwargs: None
+    runtime._cycle_counter = 1
+    runtime._consecutive_wait_count = 0
+    engine = object.__new__(MaisakaReasoningEngine)
+    engine._runtime = runtime
+    engine._emit_flow_step = AsyncMock()
+    engine._build_action_tool_definitions = AsyncMock(return_value=([], ""))
+    engine._refresh_jargon_reference_message = lambda: None
+    engine._run_interruptible_planner = AsyncMock(return_value=SimpleNamespace())
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def prepare_context(**kwargs):
+        started.set()
+        await release.wait()
+        return ["背景记忆"]
+
+    monkeypatch.setattr(engine, "_build_planner_injected_user_messages", prepare_context)
+    state = CycleRuntimeState()
+    task = asyncio.create_task(engine._run_planner_request(
+        trigger_message=first, source_messages=[first], round_index=0, round_text="第 1 轮", state=state,
+    ))
+    await asyncio.wait_for(started.wait(), timeout=1)
+    runtime.message_cache.append(pending)
+    release.set()
+    trigger, sources = await task
+
+    assert trigger.message_id == expected_target
+    assert state.reply_target_message.message_id == expected_target
+    assert sources == [first, pending]
+    assert not runtime._has_pending_messages()
+    assert [message.message_id for message in runtime._chat_history] == (
+        ["first", "pending"] if pending_second > 0 else ["pending", "first"]
+    )
+    engine._run_interruptible_planner.assert_awaited_once()
+    args = engine._run_interruptible_planner.call_args.kwargs
+    assert f"msg_id={expected_target}" in args["tail_user_messages"][0]
 
 
 @pytest.mark.parametrize("name", ["maisaka_chat", "maisaka_replyer", "maisaka_turn_anchor"])

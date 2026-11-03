@@ -76,6 +76,7 @@ from src.maisaka.context.post_processor import process_chat_history_after_cycle
 from src.maisaka.context.history import (
     build_prefixed_message_sequence,
     build_session_message_visible_text,
+    normalize_tool_result_order,
 )
 from src.maisaka.jargon_context_matcher import (
     build_jargon_reference_message,
@@ -578,7 +579,7 @@ class MaisakaReasoningEngine:
         round_index: int,
         round_text: str,
         state: CycleRuntimeState,
-    ) -> None:
+    ) -> tuple[SessionMessage, list[SessionMessage]]:
         """准备上下文并执行一次 Planner 请求。"""
 
         planner_started_at = time.time()
@@ -603,6 +604,12 @@ class MaisakaReasoningEngine:
             deferred_tools_reminder=deferred_tools_reminder,
             round_text=round_text,
         )
+        # 记忆检索、压缩等准备期间仍会收到消息；请求前补齐，避免先回复旧快照，
+        # 再把早已收到的补充误当作对刚发出回复的追问。已准备的记忆仍作为背景使用。
+        pending_messages = await self._ingest_pending_messages()
+        if pending_messages:
+            source_messages = [*source_messages, *pending_messages]
+            trigger_message = max([trigger_message, *pending_messages], key=lambda message: message.timestamp)
         if not resolve_enable_visual_planner():
             log_pending_image_recognition_before_text_planner(
                 self._runtime._chat_history,
@@ -648,6 +655,7 @@ class MaisakaReasoningEngine:
             state.planner_ended_at = time.time()
             state.planner_duration_ms = (state.planner_ended_at - planner_started_at) * 1000
         state.response = response
+        return trigger_message, source_messages
 
     async def _handle_planner_interrupt(
         self,
@@ -979,7 +987,7 @@ class MaisakaReasoningEngine:
                             await self._post_process_chat_history_after_cycle(cycle_detail, consume_references=False)
 
                             self._runtime._start_planner_continuation()
-                            await self._run_planner_request(
+                            trigger_message, cached_messages = await self._run_planner_request(
                                 trigger_message=trigger_message,
                                 source_messages=cached_messages or [trigger_message],
                                 round_index=round_index,
@@ -1150,6 +1158,7 @@ class MaisakaReasoningEngine:
                 continue
 
             self._insert_chat_history_message(history_message)
+        self._runtime._chat_history, _ = normalize_tool_result_order(self._runtime._chat_history)
 
     async def _build_history_message(
         self,
@@ -1282,9 +1291,24 @@ class MaisakaReasoningEngine:
         )
 
     def _insert_chat_history_message(self, message: LLMContextMessage) -> int:
-        """将消息按处理顺序追加到聊天历史末尾。"""
-        self._runtime._chat_history.append(message)
-        return len(self._runtime._chat_history) - 1
+        """按真实聊天时间插入消息，保持模型内部记录的相对顺序。"""
+        history = self._runtime._chat_history
+        index = next(
+            (
+                index for index, existing in enumerate(history)
+                if isinstance(existing, SessionBackedMessage) and existing.timestamp > message.timestamp
+            ),
+            len(history),
+        )
+        # 延后接入的消息也应放在其后才生成的规划之前；工具调用与结果的配对
+        # 继续由现有历史规范化处理，不对模型内部记录做全局时间排序。
+        while index > 0:
+            previous = history[index - 1]
+            if isinstance(previous, SessionBackedMessage) or previous.timestamp <= message.timestamp:
+                break
+            index -= 1
+        history.insert(index, message)
+        return index
 
     def _start_cycle(self) -> CycleDetail:
         """开始一轮 Maisaka 思考循环。"""
