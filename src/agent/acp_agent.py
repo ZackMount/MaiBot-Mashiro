@@ -84,15 +84,21 @@ class AcpAgent:
     ) -> str:
         builder = ContextItemBuilder().add_text_content(text)
         for image in images:
-            # 接口中的图片已校验、存入工作区；上下文直接带实际图像。
+            # 原图已保存至工作区；动图以首帧预览传给 ACP，避免上游视觉接口拒绝动画。
             from io import BytesIO
             from PIL import Image
 
-            def image_format(data: bytes) -> str:
+            def image_preview(data: bytes) -> tuple[str, bytes]:
                 with Image.open(BytesIO(data)) as decoded:
-                    return decoded.format.lower()
-            fmt = await asyncio.to_thread(image_format, image.binary_data)
-            builder.add_image_content(fmt, base64.b64encode(image.binary_data).decode())
+                    fmt = decoded.format.lower()
+                    if fmt == "gif":
+                        preview = BytesIO()
+                        decoded.seek(0)
+                        decoded.convert("RGBA").save(preview, format="PNG")
+                        return "png", preview.getvalue()
+                    return fmt, data
+            fmt, preview = await asyncio.to_thread(image_preview, image.binary_data)
+            builder.add_image_content(fmt, base64.b64encode(preview).decode())
         record = await self.record(kind, [builder.build()])
         if reply_to:
             record["reply_to"] = reply_to

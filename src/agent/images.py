@@ -9,7 +9,7 @@ import asyncio
 import base64
 import re
 
-from src.common.data_models.message_component_data_model import ImageComponent
+from src.common.data_models.message_component_data_model import EmojiComponent, ImageComponent, ReplyComponent
 
 if TYPE_CHECKING:
     from .service import AgentService
@@ -25,9 +25,9 @@ async def resolve_images(
     if not references:
         return images, attachments
 
-    from .messaging import source_images
+    from .messaging import image_sources, source_images
 
-    available = await source_images(caller) if caller != service.agent_id else {}
+    available = dict(await source_images(caller)) if caller != service.agent_id else {}
     workspace = service.workspace
 
     def save(data: bytes) -> Tuple[ImageComponent, Dict[str, str]]:
@@ -44,10 +44,29 @@ async def resolve_images(
         return image, {"hash": image.binary_hash, "path": str(path)}
 
     for reference in references:
+        if reference not in available and caller != service.agent_id:
+            # A quoted message can have fallen out of the live history. Query only the
+            # current chat, and follow only its explicit quote, never the sender avatar.
+            from src.services.message_service import get_message_by_id
+
+            original = await asyncio.to_thread(get_message_by_id, reference, caller)
+            if original is not None:
+                sources = image_sources(original.raw_message.components)
+                if not sources:
+                    replies = [part.target_message_id for part in original.raw_message.components if isinstance(part, ReplyComponent)]
+                    if len(replies) == 1:
+                        quoted = await asyncio.to_thread(get_message_by_id, replies[0], caller)
+                        if quoted is not None:
+                            sources = image_sources(quoted.raw_message.components)
+                if sources:
+                    available[reference] = sources
         if reference in available:
             for original in available[reference]:
                 image = original.clone()
-                await image.load_image_binary()
+                if isinstance(image, EmojiComponent):
+                    await image.load_emoji_binary()
+                else:
+                    await image.load_image_binary()
                 image, attachment = await asyncio.to_thread(save, image.binary_data)
                 images.append(image)
                 attachments.append(attachment)

@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 from typing import Any, Dict, List
 from unittest.mock import AsyncMock, Mock
+from io import BytesIO
 
 import asyncio
 import json
@@ -145,6 +146,27 @@ def test_failed_isolated_task_does_not_poison_next_task(service, monkeypatch):
         assert sessions == ["session-1", "session-2"]
         assert not agent.inbox
 
+    asyncio.run(scenario())
+
+
+def test_animated_reference_is_preserved_but_acp_preview_is_png(service):
+    from PIL import Image
+    from src.common.data_models.message_component_data_model import ImageComponent
+    from src.llm_models.payload_content.context_item import ContextImagePart
+
+    async def scenario():
+        output = BytesIO()
+        frames = [Image.new("RGB", (8, 8), "red"), Image.new("RGB", (8, 8), "blue")]
+        frames[0].save(output, format="GIF", save_all=True, append_images=frames[1:], duration=100, loop=0)
+        data = output.getvalue()
+        image = ImageComponent(binary_hash="", binary_data=data)
+        agent = AcpAgent(service)
+        await agent.load()
+        await agent.enqueue("参考动图", images=[image])
+        item = agent.history.unpack(agent.inbox[0]["items"])[0]
+        preview = next(part for part in item.parts if isinstance(part, ContextImagePart))
+        assert preview.image_format == "png"
+        assert image.binary_data == data
     asyncio.run(scenario())
 
 

@@ -1,6 +1,6 @@
 """独立 Agent 与 IM 共用的适配层：真实会话查询、传话和图片引用。"""
 
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Union
 from uuid import uuid4
 
 import asyncio
@@ -8,7 +8,7 @@ import json
 import time
 
 from src.chat.message_receive.chat_manager import BotChatSession, chat_manager
-from src.common.data_models.message_component_data_model import ImageComponent
+from src.common.data_models.message_component_data_model import EmojiComponent, ForwardNodeComponent, ImageComponent
 from src.common.prompt_i18n import load_prompt
 
 if TYPE_CHECKING:
@@ -39,17 +39,32 @@ async def recent(target: str, limit: int) -> Dict[str, Any]:
     return {"name": chat_manager.get_session_name(target), "messages": await asyncio.to_thread(query)}
 
 
-async def source_images(caller: str) -> Dict[str, List[ImageComponent]]:
+ImageSource = Union[ImageComponent, EmojiComponent]
+
+
+def image_sources(components: Sequence[object]) -> List[ImageSource]:
+    """Keep original image and sticker bytes, including those inside forwards."""
+    result: List[ImageSource] = []
+    for component in components:
+        if isinstance(component, (ImageComponent, EmojiComponent)):
+            result.append(component)
+        elif isinstance(component, ForwardNodeComponent):
+            for node in component.forward_components:
+                result.extend(image_sources(node.content))
+    return result
+
+
+async def source_images(caller: str) -> Dict[str, List[ImageSource]]:
     from src.chat.heart_flow.heartflow_manager import heartflow_manager
     from src.maisaka.context.message_id_alias import to_display_message_id
     from src.maisaka.context.messages import ContentContextMessage
 
     runtime = await heartflow_manager.get_or_create_heartflow_chat(caller)
-    available: Dict[str, List[ImageComponent]] = {}
+    available: Dict[str, List[ImageSource]] = {}
     for message in runtime._chat_history:
         if not isinstance(message, ContentContextMessage):
             continue
-        media = runtime._collect_sent_image_components(message.media_sequence.components)
+        media = image_sources(message.media_sequence.components)
         if media and message.message_id:
             available[message.message_id] = media
             available[to_display_message_id(message.message_id)] = media
