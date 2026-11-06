@@ -104,8 +104,11 @@ class AcpAgent:
         return record["id"]
 
     async def record(self, kind: str, items: Sequence[ContextItem]) -> Dict[str, Any]:
-        return {"id": uuid4().hex, "time": datetime.now().astimezone().isoformat(), "kind": kind,
-                "items": await asyncio.to_thread(self.history.pack, items)}
+        record = {"id": uuid4().hex, "time": datetime.now().astimezone().isoformat(), "kind": kind,
+                  "items": await asyncio.to_thread(self.history.pack, items)}
+        if kind == "step" and self.backend_state.get("session_id"):
+            record["acp_session_id"] = self.backend_state["session_id"]
+        return record
 
     @property
     def desktop_manifest(self) -> Path:
@@ -199,6 +202,12 @@ class AcpAgent:
 
     async def run_turn(self) -> None:
         try:
+            if self.config.acp_session_per_task:
+                if self.connection is not None:
+                    await self.close()
+                # 旧会话仅保留在外部历史中；新任务不恢复其上下文。
+                self.backend_state.pop("session_id", None)
+                self.backend_state.pop("policy", None)
             await self.connect()
             if self.pending is not None:
                 uncertain = set(self.pending["input_ids"])
@@ -209,7 +218,7 @@ class AcpAgent:
                 await self.history.append(await self.record("step", [warning]))
                 self.pending = None
                 await self.save()
-            batch = list(self.inbox)
+            batch = self.inbox[:1] if self.config.acp_session_per_task else list(self.inbox)
             if not batch:
                 return
             items = await asyncio.to_thread(self.history.unpack, [item for record in batch for item in record["items"]])
@@ -232,6 +241,7 @@ class AcpAgent:
             self.pending = {"input_ids": [record["id"] for record in batch]}
             await self.save()
             for record in batch:
+                record["acp_session_id"] = self.backend_state["session_id"]
                 await self.history.append(record)
                 self.inbox.remove(record)
             await self.save()
@@ -266,6 +276,13 @@ class AcpAgent:
                 raise AgentTurnError(f"外接 Agent 未正常完成：{result['stopReason']}，已有输出已保留，原任务不会自动重发", batch)
         finally:
             self.state = "idle"
+            if self.config.acp_session_per_task:
+                try:
+                    await self.close()
+                finally:
+                    self.backend_state.pop("session_id", None)
+                    self.backend_state.pop("policy", None)
+                    await self.save()
 
     async def close(self) -> None:
         connection, mcp = self.connection, self.mcp

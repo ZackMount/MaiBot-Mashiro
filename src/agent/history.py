@@ -66,6 +66,7 @@ class AgentHistory:
 
     def events(self, after: int = 0) -> List[Dict[str, Any]]:
         return [{"index": index, "id": record["id"], "time": record["time"], "kind": record["kind"],
+                 "acp_session_id": record.get("acp_session_id"),
                  "items": [{**{key: value for key, value in item.items() if key != "meta"},
                             "logical_turn_id": item["meta"]["logical_turn_id"]} for item in record["items"]]}
                 for index, record in enumerate(self.records[after:], start=after)]

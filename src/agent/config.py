@@ -62,6 +62,11 @@ class AgentConfig(ConfigBase):
     acp_model: str = Field(default="", json_schema_extra={"label": {"zh_CN": "ACP 模型选项"}, "advanced": True})
     """留空使用外部 Agent 自身模型配置；填写时必须是其 model 配置选项公布的值，不使用本体 planner 回退。"""
 
+    acp_session_per_task: bool = Field(default=False, json_schema_extra={
+        "label": {"zh_CN": "每个任务使用独立 ACP 会话"}, "advanced": True,
+    })
+    """为每条独立 Agent 请求创建新会话；保留工作区和麦麦历史，但不把此前 ACP 会话上下文带入新任务。"""
+
     acp_timeout: float = Field(default=60, gt=0, json_schema_extra={"label": {"zh_CN": "ACP 连接与关停超时（秒）"}, "advanced": True})
     """握手、会话恢复和取消确认的等待时间，不限制任务执行时长。"""
 

@@ -59,6 +59,95 @@ async def prepare_agent(service: AgentService, monkeypatch, reason: str = "end_t
     return agent
 
 
+def test_isolated_tasks_open_separate_sessions_and_do_not_batch(service, monkeypatch):
+    async def scenario():
+        service.config.acp_session_per_task = True
+        agent = AcpAgent(service)
+        await agent.load()
+        service.agent = agent
+        sessions = []
+        prompts = []
+
+        class TaskConnection:
+            failure = None
+
+            async def request(self, method, params):
+                assert method == "session/prompt"
+                prompts.append(params)
+                return {"stopReason": "end_turn"}
+
+            async def close(self, timeout):
+                pass
+
+        async def connect():
+            assert "session_id" not in agent.backend_state
+            session_id = f"session-{len(sessions) + 1}"
+            sessions.append(session_id)
+            agent.backend_state["session_id"] = session_id
+            agent.connection = TaskConnection()
+
+        monkeypatch.setattr(agent, "connect", connect)
+        await agent.enqueue("first", reply_to="chat-a")
+        await agent.enqueue("second", reply_to="chat-b")
+        await agent.run_turn()
+        assert len(agent.inbox) == 1
+        await agent.run_turn()
+
+        assert sessions == ["session-1", "session-2"]
+        assert [p["sessionId"] for p in prompts] == sessions
+        assert "first" in [part["text"] for part in prompts[0]["prompt"]]
+        assert "second" not in [part["text"] for part in prompts[0]["prompt"]]
+        assert "second" in [part["text"] for part in prompts[1]["prompt"]]
+        assert "first" not in [part["text"] for part in prompts[1]["prompt"]]
+        assert all(prompt["prompt"][0]["text"] == service.policy() for prompt in prompts)
+        assert not agent.inbox
+        assert "session_id" not in agent.backend_state
+        assert [event["acp_session_id"] for event in agent.history.events() if event["kind"] == "user"] == sessions
+
+    asyncio.run(scenario())
+
+
+def test_failed_isolated_task_does_not_poison_next_task(service, monkeypatch):
+    async def scenario():
+        service.config.acp_session_per_task = True
+        agent = AcpAgent(service)
+        await agent.load()
+        service.agent = agent
+        sessions = []
+
+        class TaskConnection:
+            failure = None
+
+            async def request(self, method, params):
+                assert method == "session/prompt"
+                if params["sessionId"] == "session-1":
+                    raise ACPRequestError({"code": 413, "message": "FUNCTION_PAYLOAD_TOO_LARGE"})
+                return {"stopReason": "end_turn"}
+
+            async def close(self, timeout):
+                pass
+
+        async def connect():
+            session_id = f"session-{len(sessions) + 1}"
+            sessions.append(session_id)
+            agent.backend_state["session_id"] = session_id
+            agent.connection = TaskConnection()
+
+        monkeypatch.setattr(agent, "connect", connect)
+        first = await agent.enqueue("large task", reply_to="chat-a")
+        await agent.enqueue("next task", reply_to="chat-b")
+        with pytest.raises(Exception, match="FUNCTION_PAYLOAD_TOO_LARGE") as error:
+            await agent.run_turn()
+        assert error.value.reply_targets == {"chat-a": [first]}
+        assert len(agent.inbox) == 1
+        assert agent.pending is None
+        await agent.run_turn()
+        assert sessions == ["session-1", "session-2"]
+        assert not agent.inbox
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("locale", ["zh-CN", "en-US", "ja-JP"])
 def test_policy_separates_partner_identity_and_optional_computer(service, monkeypatch, locale):
     monkeypatch.setattr("src.common.prompt_i18n.get_locale", lambda: locale)
