@@ -367,21 +367,24 @@ def _convert_messages(items: List[ContextItem]) -> Tuple[ContentListUnion, str |
             continue
 
         if isinstance(item, FunctionCallOutputItem):
-            tool_name = (item.tool_name or tool_name_by_call_id.get(item.call_id, "")).strip()
-            if not tool_name:
-                raise ValueError(
-                    f"Gemini 无法根据 tool_call_id={item.call_id} 找到对应的工具名称，且消息中未携带 tool_name"
+            response_parts: List[Part] = []
+            while index < len(items) and isinstance(items[index], FunctionCallOutputItem):
+                output_item = cast(FunctionCallOutputItem, items[index])
+                tool_name = (output_item.tool_name or tool_name_by_call_id.get(output_item.call_id, "")).strip()
+                if not tool_name:
+                    raise ValueError(
+                        f"Gemini 无法根据 tool_call_id={output_item.call_id} 找到对应的工具名称，且消息中未携带 tool_name"
+                    )
+                tool_name_by_call_id[output_item.call_id] = tool_name
+                response_parts.append(
+                    Part(function_response=FunctionResponse(
+                        id=output_item.call_id,
+                        name=tool_name,
+                        response=_normalize_function_response_payload(output_item),
+                    ))
                 )
-            tool_name_by_call_id[item.call_id] = tool_name
-            function_response_part = Part(
-                function_response=FunctionResponse(
-                    id=item.call_id,
-                    name=tool_name,
-                    response=_normalize_function_response_payload(item),
-                )
-            )
-            contents.append(Content(role="tool", parts=[function_response_part]))
-            index += 1
+                index += 1
+            contents.append(Content(role="tool", parts=response_parts))
             continue
 
         # Provider 原生活动和未知 Item 没有可移植 Gemini 投影。
