@@ -803,7 +803,11 @@ class GeminiClient(AdapterClient[AsyncIterator[GenerateContentResponse], Generat
             api_provider: API 提供商配置。
         """
         super().__init__(api_provider)
-        self.client = genai.Client(
+        self.client = self._create_client(api_provider)
+
+    @staticmethod
+    def _create_client(api_provider: APIProvider) -> genai.Client:
+        return genai.Client(
             api_key=api_provider.api_key,
             http_options=_build_http_options(api_provider),
         )
