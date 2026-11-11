@@ -54,7 +54,7 @@ async def test_correction_stays_separate_through_post_processing(monkeypatch, mo
     monkeypatch.setattr(utils, "_split_into_sentence_segments", lambda _text: sentences)
     monkeypatch.setattr(utils, "split_text_with_llm", split_with_llm)
 
-    result = await utils.process_llm_response_segments_async("今天先休息吧。我也准备睡了。明天见。到时候一起吃饭呀")
+    result = await utils.process_llm_response_segments_async("今天先休息吧。我也准备睡了。明天见。到时候一起吃饭呀" * 4)
 
     assert [segment.text for segment in result] == [
         "今天先休息吧。我也准备睡了。明天件",

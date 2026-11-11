@@ -280,7 +280,7 @@ async def get_embedding(text: str, request_type: str = "embedding") -> Optional[
 
 def _split_into_sentence_segments(text: str) -> list[tuple[str, str]]:
     """将文本分割成 (句子, 尾随分隔符) 元组，并根据概率合并
-    1. 识别分割点（, ， 。 ; 空格），但如果分割点左右都是英文字母则不分割。
+    1. 识别标点和换行分割点，普通空格保留在原句中。
     2. 将文本分割成 (内容, 分隔符) 的元组。
     3. 根据原始文本长度计算合并概率，概率性地合并相邻段落。
     注意：此函数假定颜文字已在上层被保护。
@@ -341,7 +341,7 @@ def _split_into_sentence_segments(text: str) -> list[tuple[str, str]]:
             inside_quote[idx] = in_quote
 
     # 定义分隔符（包含换行符）
-    separators = {"，", ",", " ", "。", ";", "\n"}
+    separators = {"，", ",", "。", ";", "\n"}
     segments = []
     current_segment = ""
 
@@ -369,20 +369,6 @@ def _split_into_sentence_segments(text: str) -> list[tuple[str, str]]:
                         next_char = text[i + 1]
                         if next_char in {":", "："}:
                             can_split = False
-
-                    # 如果左右没有冒号，再检查空格的特殊情况
-                    if can_split and char == " " and i > 0 and i < len(text) - 1:
-                        prev_char = text[i - 1]
-                        next_char = text[i + 1]
-                        dash_chars = {"-", "—"}
-                        if prev_char in dash_chars or next_char in dash_chars:
-                            can_split = False
-                        else:
-                            # 不分割数字和数字、数字和英文、英文和数字、英文和英文之间的空格
-                            prev_is_alnum = prev_char.isdigit() or is_english_letter(prev_char)
-                            next_is_alnum = next_char.isdigit() or is_english_letter(next_char)
-                            if prev_is_alnum and next_is_alnum:
-                                can_split = False
 
             if can_split:
                 # 只有当当前段不为空时才添加
@@ -612,7 +598,7 @@ def process_llm_response_segments(
         logger.warning(f"回复过长 ({len(cleaned_text)} 字符)，返回默认回复")
         return [ProcessedResponseSegment(_get_random_default_reply())]
 
-    if global_config.response_splitter.enable and enable_splitter:
+    if global_config.response_splitter.enable and enable_splitter and (len(cleaned_text) > 80 or "\n" in cleaned_text):
         split_sentences = _split_into_sentence_segments(cleaned_text)
     else:
         split_sentences = [(cleaned_text, "")]
@@ -662,6 +648,7 @@ async def process_llm_response_segments_async(
         not global_config.response_post_process.enable_response_post_process
         or not global_config.response_splitter.enable
         or not enable_splitter
+        or (len(text) <= 80 and "\n" not in text)
     ):
         return await asyncio.to_thread(process_llm_response_segments, text, enable_splitter, enable_chinese_typo)
 
