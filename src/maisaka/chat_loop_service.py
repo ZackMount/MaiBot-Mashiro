@@ -892,22 +892,30 @@ class MaisakaChatLoopService:
     def _build_query_memory_rule(self) -> str:
         """按当前聊天类型构造记忆检索提示。"""
 
-        if self._is_group_chat:
-            return self._localized_text(
-                {
-                    "en-US": "- query_memory(): Use it only when the reply clearly depends on past group conversation, shared experiences, public agreements, task progress, or recent clues. Do not retrieve memory for greetings, immediate emotional responses, light banter, or content that can be answered from recent messages alone. Do not bring private-chat or personal-privacy memories into a group chat.",
-                    "ja-JP": "- query_memory()：返信がグループ内の過去会話、共有した経験、公開された約束、タスクの進捗、最近の手がかりに明確に依存する場合だけ使ってください。挨拶、その場の感情への反応、軽いやり取り、最近のメッセージだけで答えられる内容では検索しないでください。個人チャットや私的な記憶をグループチャットに持ち込まないでください。",
-                    "zh-CN": "- query_memory()：只有回复明显依赖群内过去对话、共同经历、公开约定、任务进展或近期线索时使用；不要为了寒暄、即时情绪回应、轻松接话、只看最近消息就能回答的内容而检索。不要把私聊或个人隐私记忆带到群聊里。",
-                }
-            )
-
-        return self._localized_text(
+        rule = self._localized_text(
             {
-                "en-US": '- query_memory(): Consider retrieval more actively when the other person mentions signals like "before", "last time", "recently", "do you remember", "I like", or "I said", or when the reply depends on long-term preferences, prior promises, shared experiences, or long-term information about a person.',
-                "ja-JP": "- query_memory()：相手が「前に」「この前」「最近」「覚えてる？」「好き」「言った」などの合図を出した場合、または返信が長期的な好み、以前の約束、共有した経験、人物の長期的な情報に依存する場合は、より積極的に検索を検討できます。",
-                "zh-CN": "- query_memory()：当对方提到“之前”“上次”“最近”“还记得吗”“我喜欢”“我说过”等信号，或回复依赖长期偏好、先前承诺、共同经历、人物长期信息时，可以更积极检索。",
+                "en-US": "- Memory: Use the recent conversation, existing summary, and earlier tool results first. If they already answer the question, reply directly without calling a memory tool, even for questions about a person or the past. If an answer needs missing information about a person, prior conversation, promise, preference, or past event, call query_memory() or query_person_profile(). Start with one relevant tool. When the identity behind a name is unclear, search for the name as a keyword with query_memory(). Carry relevant findings into the reply guidance and attribute past reports to their source.",
+                "ja-JP": "- 記憶：まず最近の会話、既存の要約、前のツール結果を使ってください。人物や過去の質問でも、それだけで答えられる場合は記憶ツールを呼ばずに返信してください。人物、以前の会話、約束、好み、過去の出来事について必要な情報が足りない場合は query_memory() または query_person_profile() を使ってください。まず適切なツールを一つ選んでください。呼び名が誰を指すか不明な場合は、その呼び名をキーワードにして query_memory() で検索してください。関連する結果は返信指示に含め、過去の発言は出所を明示してください。",
+                "zh-CN": "- 先用近期原文、已有摘要和之前的工具结果。当前上下文已经能回答时直接回复，即使问的是人物或过去的事，也不用调用记忆工具。需要辨认人物，或确认旧对话、经历、约定、偏好时，现有上下文缺什么就调用 query_memory() 或 query_person_profile() 查什么。先选一个相关工具。称呼对应谁还不清楚时，用称呼作为关键词查 query_memory()。把相关结果写进回复指导，按来源和时间转述。",
             }
         )
+        if global_config.a_memorix.image_memory.enabled:
+            rule += self._localized_text(
+                {
+                    "en-US": " Use query_image_memory() when you need to know where an image appeared before or what was discussed about it.",
+                    "ja-JP": " 画像が以前どこで出たか、何が話されたかを調べる場合は query_image_memory() を使ってください。",
+                    "zh-CN": " 需要查一张图以前在哪出现过、当时聊了什么时，调用 query_image_memory()。",
+                }
+            )
+        if self._is_group_chat:
+            rule += self._localized_text(
+                {
+                    "en-US": " Search the current group by default. Use scope=groups only when the user explicitly requests another group or brings up events from another group. Keep private-chat memories out of group replies.",
+                    "ja-JP": " 通常は現在のグループだけを検索し、利用者が別のグループを明示した場合や別のグループでの出来事を話題にした場合に限り scope=groups を使ってください。個別チャットの記憶はグループに持ち込まないでください。",
+                    "zh-CN": " 默认只查当前群。用户明确要求查别的群，或主动提起别的群里的经历时，才用 scope=groups。私聊记忆留在私聊。",
+                }
+            )
+        return rule
 
     def _build_subagent_rule(self) -> str:
         """开启子代理时说明何时该把任务交给 subagent；未开启时为空，不占提示词。"""

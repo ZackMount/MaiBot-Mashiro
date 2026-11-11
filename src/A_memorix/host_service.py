@@ -263,6 +263,14 @@ class AMemorixHostService:
             shared_chat_ids = ()
             if not global_memory_sharing_enabled:
                 shared_chat_ids = tuple(AMemorixConfigUtils.get_shared_memory_session_ids(chat_id))
+                if payload.get("cross_group") and payload.get("group_id"):
+                    from src.chat.message_receive.chat_manager import chat_manager
+
+                    current = chat_manager.get_existing_session_by_session_id(chat_id)
+                    if current is not None and current.is_group_session:
+                        shared_chat_ids = tuple(set(shared_chat_ids) | {
+                            session.session_id for session in chat_manager.sessions.values() if session.is_group_session
+                        })
 
             return await kernel.search_memory(
                 KernelSearchRequest(

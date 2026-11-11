@@ -214,6 +214,7 @@ class MemoryService:
         respect_filter: bool = True,
         user_id: str = "",
         group_id: str = "",
+        cross_group: bool = False,
     ) -> MemorySearchResult:
         clean_query = str(query or "").strip()
         normalized_time_start = None if time_start in {None, ""} else time_start
@@ -234,6 +235,7 @@ class MemoryService:
                     "respect_filter": bool(respect_filter),
                     "user_id": str(user_id or "").strip(),
                     "group_id": str(group_id or "").strip(),
+                    "cross_group": bool(cross_group),
                 },
             )
             return self._coerce_search_result(payload)

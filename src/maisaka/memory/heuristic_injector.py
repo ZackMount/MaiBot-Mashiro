@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from itertools import zip_longest
 from time import time
 from typing import Sequence
 
+import asyncio
+import re
+
 from src.chat.message_receive.chat_manager import BotChatSession, chat_manager
 from src.chat.message_receive.message import SessionMessage
-from src.common.data_models.message_component_data_model import AtComponent, ReplyComponent
+from src.common.data_models.message_component_data_model import AtComponent, ReplyComponent, TextComponent
 from src.common.logger import get_logger
 from src.common.message_repository import count_messages, find_messages
 from src.common.prompt_i18n import load_prompt
+from src.common.utils.system_utils import is_bot_self
 from src.config.config import global_config
 from src.person_info.person_info import get_person_id
 from src.services.llm_service import LLMServiceClient
@@ -22,6 +27,12 @@ logger = get_logger("maisaka_heuristic_memory")
 HEURISTIC_MEMORY_REFERENCE_MARKER = "【启发式记忆-内部参考】"
 _SOURCE_CHAT_SUMMARY_PREFIX = "chat_summary:"
 _SOURCE_PERSON_FACT_PREFIX = "person_fact:"
+_QUESTION_RECALL_TIMEOUT = 4.0
+_MEMORY_QUESTION = re.compile(
+    r"还记得|记不记得|想不想得起|(?:现在|最近|后来|最后|目前).{0,8}(?:哪|怎么样|咋样|如何)"
+    r"|(?:在哪(?:儿|里)?|去哪(?:儿|里)?|在哪个|住哪|回哪|是谁|哪位|后来呢|怎么样了)[了呢啊呀吗嘛]?\s*[？?。！!]*$"
+    r"|(?:上次|之前|以前|当时|那次|前几天|说过|做过|提过).*(?:什么|哪|怎么|谁|几|多少|[？?])"
+)
 
 
 @dataclass
@@ -32,6 +43,8 @@ class HeuristicMemoryRecallState:
     last_message_count: int = 0
     cached_reference: str = ""
     cache_expires_at: float = 0.0
+    question_key: tuple[str, str] | None = None
+    question_reference: str = ""
 
 
 @dataclass(frozen=True)
@@ -58,6 +71,7 @@ class HeuristicMemoryInjector:
         self,
         *,
         session_id: str,
+        question_message: SessionMessage | None = None,
     ) -> str:
         """构造给 Planner/Replyer 共享的一次性启发式记忆参考。"""
 
@@ -71,13 +85,23 @@ class HeuristicMemoryInjector:
             logger.debug(f"启发式记忆跳过：无法解析真实聊天流 session_id={session_id!r}")
             return ""
 
+        state = self._states.setdefault(session.session_id, HeuristicMemoryRecallState())
+        if question_message is not None and question_message.session_id == session.session_id:
+            question = self._get_memory_question(question_message)
+            if question:
+                question_key = (question_message.message_id, question)
+                if state.question_key != question_key:
+                    state.question_reference = await self._recall_question(session, question)
+                    state.question_key = question_key
+                if state.question_reference:
+                    return state.question_reference
+
         window_size = config.heuristic_memory_recall_window_size
-        total_message_count = count_messages(session_id=session.session_id)
+        total_message_count = await asyncio.to_thread(count_messages, session_id=session.session_id)
         if total_message_count < window_size:
             self.clear_session_reference(session.session_id)
             return ""
 
-        state = self._states.setdefault(session.session_id, HeuristicMemoryRecallState())
         now = time()
         cache_ttl = config.heuristic_memory_recall_cache_ttl_seconds
         if state.cached_reference and cache_ttl > 0 and now < state.cache_expires_at:
@@ -93,7 +117,8 @@ class HeuristicMemoryInjector:
             self.clear_session_reference(session.session_id)
             return ""
 
-        recent_messages = find_messages(
+        recent_messages = await asyncio.to_thread(
+            find_messages,
             session_id=session.session_id,
             limit=window_size,
             limit_mode="latest",
@@ -143,6 +168,61 @@ class HeuristicMemoryInjector:
             return
         state.cached_reference = ""
         state.cache_expires_at = 0.0
+
+    @staticmethod
+    def _get_memory_question(message: SessionMessage) -> str:
+        # 只看本条消息的文字和被点名的人，引用正文、媒体描述不作为提问。
+        parts: list[str] = []
+        for component in message.raw_message.components:
+            if isinstance(component, TextComponent):
+                parts.append(component.text)
+            elif isinstance(component, AtComponent) and not is_bot_self(message.platform, component.target_user_id):
+                parts.append(component.target_user_cardname or component.target_user_nickname or "")
+        question = " ".join(" ".join(parts).split())
+        return question if len(question) <= 180 and _MEMORY_QUESTION.search(question) else ""
+
+    async def _recall_question(self, session: BotChatSession, question: str) -> str:
+        config = global_config.a_memorix.integration
+        limit = config.heuristic_memory_recall_limit
+
+        async def search(mode: str) -> list[MemoryHit]:
+            try:
+                async with asyncio.timeout(_QUESTION_RECALL_TIMEOUT):
+                    result = await memory_service.search(
+                        question,
+                        limit=limit * 2,
+                        mode=mode,
+                        chat_id=session.session_id,
+                        group_id=session.group_id or "",
+                        user_id=session.user_id or "",
+                        cross_group=False,
+                    )
+                    if not result.success or result.filtered:
+                        return []
+                    hits = [hit for hit in result.hits if hit.hit_type in {"paragraph", "episode"}]
+                    resolved_sources = await self._resolve_hit_sources_by_hash(hits)
+                    return [
+                        hit
+                        for hit in hits
+                        if self._resolve_source_session_id(
+                            source=resolved_sources.get(hit.hash_value) or hit.metadata.get("source") or hit.source,
+                            chat_id=hit.metadata.get("chat_id") or "",
+                        ) == session.session_id
+                    ]
+            except TimeoutError:
+                logger.info(f"当前会话定向记忆检索超时: session_id={session.session_id} mode={mode}")
+                return []
+
+        episodes, paragraphs = await asyncio.gather(search("episode"), search("search"))
+        # 交错保留两路结果，避免一个来源占满注入额度。
+        by_content: dict[str, MemoryHit] = {}
+        for pair in zip_longest(episodes, paragraphs):
+            for hit in pair:
+                if hit is not None and hit.content.strip():
+                    by_content.setdefault(hit.content.strip(), hit)
+        hits = list(by_content.values())[:limit]
+        logger.info(f"当前会话定向记忆检索完成: session_id={session.session_id} hits={len(hits)}")
+        return self._format_reference(hits, max_chars=config.heuristic_memory_recall_max_chars, targeted=True)
 
     @staticmethod
     def _can_trigger(
@@ -368,12 +448,19 @@ class HeuristicMemoryInjector:
         ).strip()
 
     @staticmethod
-    def _format_reference(hits: Sequence[MemoryHit], *, max_chars: int) -> str:
+    def _format_reference(hits: Sequence[MemoryHit], *, max_chars: int, targeted: bool = False) -> str:
         if not hits:
             return ""
+        guidance = (
+            "Historical memories retrieved for the current question from this chat. "
+            "Use relevant entries as evidence and describe past reports as such."
+            if targeted
+            else "Internal long-term memory recalled from the current chat impression. "
+            "Use it only as reasoning context; do not quote it verbatim to the user."
+        )
         lines = [
             HEURISTIC_MEMORY_REFERENCE_MARKER,
-            "Internal long-term memory recalled from the current chat impression. Use it only as reasoning context; do not quote it verbatim to the user.",
+            guidance,
             "",
         ]
         for index, hit in enumerate(hits, start=1):

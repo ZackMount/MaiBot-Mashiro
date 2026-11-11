@@ -546,6 +546,7 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
         self._mark_message_turn_unscheduled()
         self._cancel_deferred_message_turn_task()
         self._cancel_wait_timeout_task()
+        await self._reasoning_engine.cancel_background_context_tasks()
         await self._cancel_trimmed_history_learning_task()
         await self._stop_background_subagents()
         while not self._internal_turn_queue.empty():

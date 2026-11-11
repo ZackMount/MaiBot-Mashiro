@@ -293,21 +293,24 @@ async def test_planner_includes_messages_received_during_context_preparation(mon
     runtime._update_stage_status = lambda *args, **kwargs: None
     runtime._cycle_counter = 1
     runtime._consecutive_wait_count = 0
-    engine = object.__new__(MaisakaReasoningEngine)
-    engine._runtime = runtime
+    engine = MaisakaReasoningEngine(runtime)
     engine._emit_flow_step = AsyncMock()
-    engine._build_action_tool_definitions = AsyncMock(return_value=([], ""))
     engine._refresh_jargon_reference_message = lambda: None
     engine._run_interruptible_planner = AsyncMock(return_value=SimpleNamespace())
     started = asyncio.Event()
     release = asyncio.Event()
+    memory_search = AsyncMock(side_effect=AssertionError("Planner 发出前不应查长期记忆"))
+    image_search = AsyncMock(side_effect=AssertionError("Planner 发出前不应查图片记忆"))
+    from src.services.memory_service import memory_service
+    monkeypatch.setattr(memory_service, "search", memory_search)
+    monkeypatch.setattr(memory_service, "image_memory", image_search)
 
-    async def prepare_context(**kwargs):
+    async def prepare_tools():
         started.set()
         await release.wait()
-        return ["背景记忆"]
+        return [], "可发现工具"
 
-    monkeypatch.setattr(engine, "_build_planner_injected_user_messages", prepare_context)
+    monkeypatch.setattr(engine, "_build_action_tool_definitions", prepare_tools)
     state = CycleRuntimeState()
     task = asyncio.create_task(engine._run_planner_request(
         trigger_message=first, source_messages=[first], round_index=0, round_text="第 1 轮", state=state,
@@ -327,6 +330,9 @@ async def test_planner_includes_messages_received_during_context_preparation(mon
     engine._run_interruptible_planner.assert_awaited_once()
     args = engine._run_interruptible_planner.call_args.kwargs
     assert f"msg_id={expected_target}" in args["tail_user_messages"][0]
+    assert args["injected_user_messages"] == ["可发现工具"]
+    memory_search.assert_not_awaited()
+    image_search.assert_not_awaited()
 
 
 @pytest.mark.parametrize("name", ["maisaka_chat", "maisaka_replyer", "maisaka_turn_anchor"])

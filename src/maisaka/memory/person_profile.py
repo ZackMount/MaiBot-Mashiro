@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from time import monotonic
 from typing import Sequence
 
+import asyncio
+
 from src.chat.message_receive.message import SessionMessage
-from src.A_memorix.core.utils.profile_text import build_profile_injection_text
 from src.common.data_models.message_component_data_model import AtComponent, ReplyComponent
 from src.common.logger import get_logger
 from src.config.config import global_config
@@ -16,8 +18,9 @@ from src.services.memory_service import memory_service
 
 logger = get_logger("maisaka_person_profile_injector")
 
-PROFILE_QUERY_LIMIT = 4
-PROFILE_TEXT_MAX_CHARS = 900
+PROFILE_QUERY_LIMIT = 20
+PROFILE_CACHE_SECONDS = 120.0
+_SCOPED_PROFILE_CACHE: dict[tuple[str, str], tuple[float, str]] = {}
 
 
 @dataclass(frozen=True)
@@ -196,13 +199,6 @@ def _profile_display_name(candidate: PersonProfileCandidate, payload: object) ->
     return _candidate_name(candidate.person_name, candidate.user_id, candidate.person_id)
 
 
-def _truncate_profile_text(profile_text: str) -> str:
-    normalized = profile_text.strip()
-    if len(normalized) <= PROFILE_TEXT_MAX_CHARS:
-        return normalized
-    return normalized[:PROFILE_TEXT_MAX_CHARS].rstrip() + "..."
-
-
 def _format_profile_reference_block(blocks: Sequence[str]) -> str:
     joined_blocks = "\n\n".join(blocks).strip()
     if not joined_blocks:
@@ -211,12 +207,12 @@ def _format_profile_reference_block(blocks: Sequence[str]) -> str:
         "【人物画像-内部参考】\n"
         "以下内容仅供内部推理，不要向用户逐字复述。\n\n"
         f"{joined_blocks}\n\n"
-        "使用时把它当作对当前人物的背景理解；若与当前对话冲突，以当前对话为准。"
+        "使用时把它当作对当前人物的背景理解；未确认信息不当作确定事实，若与当前对话冲突，以当前对话为准。"
     )
 
 
 def _format_profile_person_block(display_name: str, profile_text: str) -> str:
-    return f"{display_name}：\n  {_truncate_profile_text(profile_text)}"
+    return f"{display_name}：\n  {profile_text.strip()}"
 
 
 async def build_person_profile_injection_messages(
@@ -230,7 +226,8 @@ async def build_person_profile_injection_messages(
     if not integration_config.enable_person_profile_injection:
         return []
 
-    candidates = collect_person_profile_candidates(
+    candidates = await asyncio.to_thread(
+        collect_person_profile_candidates,
         anchor_message,
         pending_messages,
         max_profiles=integration_config.person_profile_injection_max_profiles,
@@ -238,43 +235,41 @@ async def build_person_profile_injection_messages(
     if not candidates:
         return []
 
-    context_text = "\n".join(
-        str(message.processed_plain_text or "").strip()
-        for message in [anchor_message, *(pending_messages or ())]
-        if str(message.processed_plain_text or "").strip()
-    )[:1000]
-    blocks: list[str] = []
-    for candidate in candidates:
+    session_id = str(anchor_message.session_id or "").strip()
+    group_info = anchor_message.message_info.group_info
+    group_id = str(group_info.group_id or "").strip() if group_info else ""
+    user_id = str(anchor_message.message_info.user_info.user_id or "").strip()
+    if not session_id:
+        return []
+
+    async def query_candidate(candidate: PersonProfileCandidate) -> str:
+        cache_key = (session_id, candidate.person_id)
+        cached = _SCOPED_PROFILE_CACHE.get(cache_key)
+        if cached and monotonic() < cached[0]:
+            return _format_profile_person_block(candidate.person_name or candidate.user_id or candidate.person_id, cached[1]) if cached[1] else ""
         try:
-            payload = await memory_service.profile_admin(
-                action="query",
+            result = await memory_service.search(
+                candidate.person_name or candidate.user_id or candidate.person_id,
+                mode="search",
+                chat_id=session_id,
                 person_id=candidate.person_id,
                 limit=PROFILE_QUERY_LIMIT,
-                context_text=context_text,
+                user_id=user_id,
+                group_id=group_id,
             )
         except Exception as exc:
             logger.debug(f"查询人物画像注入内容失败: person_id={candidate.person_id!r} err={exc}")
-            continue
+            return ""
 
-        if not isinstance(payload, dict) or not bool(payload.get("success")):
-            error = payload.get("error") if isinstance(payload, dict) else "invalid_payload"
-            logger.debug(f"人物画像注入跳过: person_id={candidate.person_id!r} error={error}")
-            continue
-
-        uncertain_candidates = [
-            str(item.get("text", "")) for item in payload.get("uncertain_candidates", []) if isinstance(item, dict)
-        ]
-        profile_text = build_profile_injection_text(
-            _extract_profile_text(payload),
-            uncertain_candidates=uncertain_candidates,
-            include_uncertain_fallback=False,
-        )
+        if not result.success or result.filtered:
+            logger.debug(f"人物记忆注入跳过: person_id={candidate.person_id!r} error={result.error}")
+            return ""
+        profile_text = "\n".join(f"- {hit.content.strip()}" for hit in result.hits if hit.content.strip())
+        _SCOPED_PROFILE_CACHE[cache_key] = (monotonic() + PROFILE_CACHE_SECONDS, profile_text)
         if not profile_text:
-            logger.debug(f"人物画像注入跳过空画像: person_id={candidate.person_id!r}")
-            continue
+            return ""
+        return _format_profile_person_block(candidate.person_name or candidate.user_id or candidate.person_id, profile_text)
 
-        display_name = _profile_display_name(candidate, payload)
-        blocks.append(_format_profile_person_block(display_name, profile_text))
-
+    blocks = [block for block in await asyncio.gather(*(query_candidate(candidate) for candidate in candidates)) if block]
     reference_block = _format_profile_reference_block(blocks)
     return [reference_block] if reference_block else []

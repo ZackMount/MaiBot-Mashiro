@@ -502,7 +502,7 @@ class FocusGroupRuntime:
             await self._compact()
             await self.tools.refresh()
             generation = self._generation
-            references = await self._build_references()
+            references = self._build_references()
             # 整理参考信息期间到达的就绪输入也接入本次请求；请求发出后使用固定快照。
             self._take_ready_inputs()
             related = set(self.members)
@@ -560,31 +560,23 @@ class FocusGroupRuntime:
                 return
         logger.info("Focus 达到本轮内部思考上限: scope=%s", self.scope_id)
 
-    async def _build_references(self) -> List[str]:
-        """沿用各聊天的自动记忆/人物注入，并为每份参考信息标明真实来源。"""
-        grouped: Dict[str, List[SessionMessage]] = {}
+    def _build_references(self) -> List[str]:
+        """为有新消息的聊天附上黑话参考并标明来源。"""
+        active_session_ids = {}
         for entry in self.entries:
             for message in entry.messages:
                 if not isinstance(message, SessionBackedMessage):
                     continue
                 sid = message.original_message.session_id
                 if entry.progress.get(sid, 0) > self._considered.get(sid, 0) and sid in self.members:
-                    grouped.setdefault(sid, []).append(message.original_message)
+                    active_session_ids[sid] = None
         references = []
-        for sid, messages in grouped.items():
-            member = self.members[sid]
-            injected = await member._reasoning_engine._build_planner_injected_user_messages(
-                profile_message=messages[-1],
-                source_messages=messages,
-                deferred_tools_reminder="",
-            )
-            jargon = member._reasoning_engine._refresh_jargon_reference_message()
+        for sid in active_session_ids:
+            jargon = self.members[sid]._reasoning_engine._refresh_jargon_reference_message()
             if jargon is not None:
-                injected.append(jargon.processed_plain_text)
-            if injected:
                 references.append(
                     f'<focus_reference session_id="{escape(sid, quote=True)}">\n'
-                    + "\n".join(injected)
+                    + jargon.processed_plain_text
                     + "\n</focus_reference>"
                 )
         return references

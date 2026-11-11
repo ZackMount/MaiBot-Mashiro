@@ -6,7 +6,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
 from html import escape
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Literal, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional
 
 import asyncio
 import difflib
@@ -82,15 +82,12 @@ from src.maisaka.jargon_context_matcher import (
     build_jargon_reference_message,
     extract_jargon_reference_contents,
 )
-from src.maisaka.memory.heuristic_injector import heuristic_memory_injector
-from src.maisaka.memory.image_injector import image_memory_injector
 from src.maisaka.monitor.tool_media import build_tool_result_images
-from src.maisaka.context.compaction import ContextSummaryMessage, build_context_summary
+from src.maisaka.context.compaction import ContextSummaryMessage, PlannerRequestSnapshot, build_context_summary
 from src.maisaka.monitor.events import (
     emit_flow_step,
     emit_planner_snapshot,
 )
-from src.maisaka.memory.person_profile import build_person_profile_injection_messages
 from src.maisaka.context.planner_messages import (
     build_planner_turn_anchor,
     build_planner_user_prefix_from_session_message,
@@ -163,6 +160,7 @@ class MaisakaReasoningEngine:
         self._last_reasoning_content: str = ""
         self._active_logical_turn_id: str | None = None
         self._turn_passive_replyer: Optional[bool] = None
+        self._context_summary_task: asyncio.Task[ContextSummaryMessage | None] | None = None
 
     @property
     def passive_replyer_enabled(self) -> bool:
@@ -281,76 +279,13 @@ class MaisakaReasoningEngine:
             self._runtime.build_deferred_tools_reminder(),
         )
 
-    async def _build_planner_injected_user_messages(
-        self,
-        *,
-        profile_message: SessionMessage,
-        source_messages: list[SessionMessage],
-        deferred_tools_reminder: str,
-        round_text: Optional[str] = None,
-    ) -> list[str]:
-        """构造本轮 planner 的一次性注入消息。"""
-
-        injected_messages: list[str] = []
-        if deferred_tools_reminder:
-            injected_messages.append(deferred_tools_reminder)
-
-        async def build_heuristic_memory_message() -> str:
-            try:
-                return await heuristic_memory_injector.build_injection_message(
-                    session_id=str(self._runtime.session_id or ""),
-                )
-            except Exception as exc:
-                logger.debug(f"{self._runtime.log_prefix} 启发式记忆自然拉起失败，已跳过: {exc}")
-                return ""
-
-        async def build_profile_messages() -> list[str]:
-            try:
-                return await build_person_profile_injection_messages(
-                    anchor_message=profile_message,
-                    pending_messages=source_messages,
-                )
-            except Exception as exc:
-                logger.debug(f"{self._runtime.log_prefix} 人物画像自动注入失败，已跳过: {exc}")
-                return []
-
-        async def build_image_memory_message() -> str:
-            try:
-                return await image_memory_injector.build_injection_message(
-                    session_id=str(self._runtime.session_id or ""),
-                    source_messages=source_messages,
-                )
-            except Exception as exc:
-                logger.debug(f"{self._runtime.log_prefix} 图片记忆自然拉起失败，已跳过: {exc}")
-                return ""
-
-        pending = {"启发式记忆", "人物画像", "图片记忆"}
-        if round_text is not None:
-            self._runtime._update_stage_status("组织上下文", "正在准备：启发式记忆、人物画像、图片记忆", round_text=round_text)
-
-        async def measure_injection(name: str, build: Callable[[], Awaitable[Any]]) -> Any:
-            started = time.perf_counter()
-            try:
-                return await build()
-            finally:
-                elapsed = time.perf_counter() - started
-                pending.discard(name)
-                logger.info(f"{self._runtime.log_prefix} 上下文准备: {name} 耗时={elapsed:.2f}s")
-                if pending and round_text is not None:
-                    remaining = "、".join(item for item in ("启发式记忆", "人物画像", "图片记忆") if item in pending)
-                    self._runtime._update_stage_status("组织上下文", f"正在等待：{remaining}", round_text=round_text)
-
-        heuristic_memory_message, profile_messages, image_memory_message = await asyncio.gather(
-            measure_injection("启发式记忆", build_heuristic_memory_message),
-            measure_injection("人物画像", build_profile_messages),
-            measure_injection("图片记忆", build_image_memory_message),
-        )
-        if heuristic_memory_message:
-            injected_messages.append(heuristic_memory_message)
-        injected_messages.extend(profile_messages)
-        if image_memory_message:
-            injected_messages.append(image_memory_message)
-        return injected_messages
+    async def cancel_background_context_tasks(self) -> None:
+        """会话结束时取消属于它的上下文压缩任务。"""
+        task = self._context_summary_task
+        self._context_summary_task = None
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
     def _refresh_jargon_reference_message(self) -> Optional[ReferenceMessage]:
         """基于当前 planner 上下文刷新黑话参考消息。"""
@@ -582,6 +517,7 @@ class MaisakaReasoningEngine:
     ) -> tuple[SessionMessage, list[SessionMessage]]:
         """准备上下文并执行一次 Planner 请求。"""
 
+        self._apply_finished_context_summary()
         planner_started_at = time.time()
         state.planner_started_at = planner_started_at
         context_started = time.perf_counter()
@@ -598,14 +534,7 @@ class MaisakaReasoningEngine:
             logger.debug(f"{self._runtime.log_prefix} 黑话参考消息刷新失败，已跳过: {exc}")
         finally:
             logger.info(f"{self._runtime.log_prefix} 上下文准备: 黑话参考 耗时={time.perf_counter() - jargon_started:.2f}s")
-        injected_user_messages = await self._build_planner_injected_user_messages(
-            profile_message=trigger_message,
-            source_messages=source_messages,
-            deferred_tools_reminder=deferred_tools_reminder,
-            round_text=round_text,
-        )
-        # 记忆检索、压缩等准备期间仍会收到消息；请求前补齐，避免先回复旧快照，
-        # 再把早已收到的补充误当作对刚发出回复的追问。已准备的记忆仍作为背景使用。
+        # 请求前补齐准备期间收到的消息，避免把早已收到的补充误当成对刚发出回复的追问。
         pending_messages = await self._ingest_pending_messages()
         if pending_messages:
             source_messages = [*source_messages, *pending_messages]
@@ -644,7 +573,7 @@ class MaisakaReasoningEngine:
                 None,
             )
             response = await self._run_interruptible_planner(
-                injected_user_messages=injected_user_messages or None,
+                injected_user_messages=[deferred_tools_reminder] if deferred_tools_reminder else None,
                 tail_user_messages=[
                     build_planner_turn_anchor(trigger_message, round_index, self._runtime._chat_history),
                     *build_consecutive_wait_reminders(self._runtime._consecutive_wait_count),
@@ -1337,63 +1266,37 @@ class MaisakaReasoningEngine:
         enable_compaction: bool = True,
         consume_references: bool = True,
     ) -> None:
-        """生成滚动状态后提交裁切；压缩失败也丢弃本批旧原文，继续处理近期消息。"""
-        original_history = list(self._runtime._chat_history)
+        """裁切历史并在后台生成滚动摘要，下一轮可直接进入 Planner。"""
+        self._apply_finished_context_summary()
+        planner_snapshot = self._runtime._chat_loop_service.planner_request_snapshot
         process_result = process_chat_history_after_cycle(
             self._runtime._chat_history,
             max_context_size=self._runtime._max_context_size,
             pending_call_ids=self._runtime._get_pending_wait_tool_call_ids(),
             consume_references=consume_references,
+            trim_context=not enable_compaction or (planner_snapshot is not None and self._context_summary_task is None),
         )
         if process_result.changed_count <= 0:
             return
 
         trimmed_chat_count = sum(message.count_in_context for message in process_result.removed_messages)
-        final_history = process_result.history
-        if process_result.removed_messages and enable_compaction:
-            planner_snapshot = self._runtime._chat_loop_service.planner_request_snapshot
-            if planner_snapshot is None:
-                # 冷启动或上次摘要提交后必须先完成一次 Planner 请求，才能复用真实前缀。
-                return
-            summary_started_at = time.time()
-            previous_summary = next(
-                (message for message in reversed(original_history) if isinstance(message, ContextSummaryMessage)), None
-            )
-            summary: ContextSummaryMessage | None = None
-            try:
-                summary = await build_context_summary(
-                    process_result.removed_messages,
-                    planner_snapshot=planner_snapshot,
-                    previous_summary=previous_summary,
-                    recent_messages=[message for message in final_history if not isinstance(message, ContextSummaryMessage)],
-                    session_id=self._runtime.session_id,
-                    max_summary_chars=global_config.chat.context_compaction_summary_max_chars,
-                )
-            except Exception:
-                logger.exception(f"{self._runtime.log_prefix} 上下文压缩失败，将直接裁切本批旧原文，不再重试本批内容")
-            finally:
-                cycle_detail.time_records["context_compaction"] = time.time() - summary_started_at
-            # /clear 或其他异步操作可能在模型请求期间改变历史，禁止用旧快照覆盖新状态。
-            if len(self._runtime._chat_history) != len(original_history) or any(
-                current is not original
-                for current, original in zip(self._runtime._chat_history, original_history, strict=True)
-            ):
-                logger.info(f"{self._runtime.log_prefix} 压缩期间上下文已改变，取消提交旧快照")
-                return
-            if summary is not None:
-                final_history = [summary, *[
-                    message for message in final_history if not isinstance(message, ContextSummaryMessage)
-                ]]
-                logger.info(
-                    f"{self._runtime.log_prefix} 上下文压缩完成: "
-                    f"压缩={trimmed_chat_count} 保留原文={process_result.remaining_context_count} "
-                    f"摘要字符={len(summary.content)}"
-                )
-            # 失败时直接提交已规划的裁切，保留上一份有效摘要；清除快照后不再尝试同一批旧原文。
-
-        self._runtime._chat_history = final_history
+        self._runtime._chat_history = process_result.history
         if process_result.removed_messages:
             self._runtime._chat_loop_service.planner_request_snapshot = None
+            if enable_compaction and planner_snapshot is not None:
+                previous_summary = next(
+                    (message for message in reversed(process_result.history) if isinstance(message, ContextSummaryMessage)),
+                    None,
+                )
+                self._context_summary_task = asyncio.create_task(
+                    self._build_background_context_summary(
+                        process_result.removed_messages,
+                        planner_snapshot=planner_snapshot,
+                        previous_summary=previous_summary,
+                        recent_messages=[message for message in process_result.history if not isinstance(message, ContextSummaryMessage)],
+                        trimmed_chat_count=trimmed_chat_count,
+                    )
+                )
         if trimmed_chat_count <= 0:
             return
         # 常规收尾不单独展示，仅在确实裁切上下文后记录附加处理。
@@ -1424,6 +1327,45 @@ class MaisakaReasoningEngine:
         await self._runtime._trigger_trimmed_history_learning(
             process_result.removed_messages, on_progress=report_learning
         )
+
+    async def _build_background_context_summary(
+        self,
+        removed_messages: list[LLMContextMessage],
+        *,
+        planner_snapshot: PlannerRequestSnapshot,
+        previous_summary: ContextSummaryMessage | None,
+        recent_messages: list[LLMContextMessage],
+        trimmed_chat_count: int,
+    ) -> ContextSummaryMessage | None:
+        started = time.perf_counter()
+        try:
+            summary = await build_context_summary(
+                removed_messages,
+                planner_snapshot=planner_snapshot,
+                previous_summary=previous_summary,
+                recent_messages=recent_messages,
+                session_id=self._runtime.session_id,
+                max_summary_chars=global_config.chat.context_compaction_summary_max_chars,
+            )
+        except Exception:
+            logger.exception(f"{self._runtime.log_prefix} 后台上下文压缩失败，继续使用上一份有效摘要")
+            return None
+        logger.info(
+            f"{self._runtime.log_prefix} 后台上下文压缩完成: 压缩={trimmed_chat_count} "
+            f"摘要字符={len(summary.content)} 耗时={time.perf_counter() - started:.2f}s"
+        )
+        return summary
+
+    def _apply_finished_context_summary(self) -> None:
+        """在轮次边界合并摘要，保留后台运行期间收到的消息。"""
+        task = self._context_summary_task
+        if task is None or not task.done():
+            return
+        self._context_summary_task = None
+        if not task.cancelled() and (summary := task.result()) is not None:
+            self._runtime._chat_history = [
+                summary, *(message for message in self._runtime._chat_history if not isinstance(message, ContextSummaryMessage))
+            ]
 
     @staticmethod
     def _calculate_similarity(text1: str, text2: str) -> float:

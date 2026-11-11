@@ -17,7 +17,7 @@ def get_tool_spec(*, enabled: bool = True) -> ToolSpec:
 
     return ToolSpec(
         name="query_person_profile",
-        description="查询人物画像。当需要查询与某人的关系时使用。",
+        description="查询当前聊天中与某人相关的记忆、身份和互动；用户明确提到其他群时可跨群查询。",
         parameters_schema={
             "type": "object",
             "properties": {
@@ -34,6 +34,8 @@ def get_tool_spec(*, enabled: bool = True) -> ToolSpec:
                     "description": "证据上限。",
                     "default": DEFAULT_PROFILE_LIMIT,
                 },
+                "scope": {"type": "string", "enum": ["current", "groups"], "default": "current",
+                          "description": "默认只查当前聊天；只有用户明确要求查其他群或主动提到其他群经历时才用 groups。"},
             },
         },
         provider_name="maisaka_builtin",
@@ -93,7 +95,6 @@ async def handle_tool(
 ) -> ToolExecutionResult:
     """执行 query_person_profile 内置工具。"""
 
-    del context
     person_id = str(invocation.arguments.get("person_id") or "").strip()
     person_name = str(invocation.arguments.get("person_name") or "").strip()
     if not person_id and not person_name:
@@ -102,51 +103,17 @@ async def handle_tool(
             "query_person_profile 需要提供 person_id 或 person_name 中的一个。",
         )
 
-    limit = _normalize_limit(invocation.arguments.get("limit"))
-    try:
-        if person_id:
-            payload = await memory_service.profile_admin(
-                action="query",
-                person_id=person_id,
-                limit=limit,
-            )
-        else:
-            payload = await memory_service.profile_admin(
-                action="query",
-                person_keyword=person_name,
-                limit=limit,
-            )
-    except Exception as exc:
-        return tool_ctx.build_failure_result(
-            invocation.tool_name,
-            f"人物画像查询失败：{exc}",
-        )
+    from .query_memory import handle_tool as query_memory
 
-    if not isinstance(payload, dict):
-        return tool_ctx.build_failure_result(
-            invocation.tool_name,
-            "人物画像查询失败：invalid_payload",
-        )
-
-    structured_content = _build_structured_content(
-        payload=payload,
-        requested_person_id=person_id,
-        requested_person_name=person_name,
-        limit=limit,
-    )
-    if not bool(payload.get("success")):
-        error_message = str(payload.get("error") or "未找到人物画像。").strip()
-        return tool_ctx.build_failure_result(
-            invocation.tool_name,
-            error_message,
-            structured_content=structured_content,
-        )
-
-    profile_text = structured_content["summary"]
-    if not profile_text:
-        profile_text = "未找到可用的人物画像。"
-    return tool_ctx.build_success_result(
-        invocation.tool_name,
-        profile_text,
-        structured_content=structured_content,
-    )
+    arguments = {
+        "query": person_name or person_id,
+        "person_name": person_name,
+        "person_id": person_id,
+        "limit": _normalize_limit(invocation.arguments.get("limit")),
+        "scope": invocation.arguments.get("scope") or "current",
+    }
+    return await query_memory(tool_ctx, ToolInvocation(
+        tool_name=invocation.tool_name, arguments=arguments, call_id=invocation.call_id,
+        session_id=invocation.session_id, stream_id=invocation.stream_id,
+        reasoning=invocation.reasoning, metadata=invocation.metadata,
+    ), context)

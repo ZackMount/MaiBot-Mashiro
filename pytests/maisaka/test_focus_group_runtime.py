@@ -546,7 +546,7 @@ async def test_failed_compaction_continues_to_planner_in_same_turn(setup_group, 
     _seed_planner_snapshot(group)
     planner = AsyncMock(return_value=_response())
     monkeypatch.setattr(group._service, "chat_loop_step", planner)
-    monkeypatch.setattr(group, "_build_references", AsyncMock(return_value=[]))
+    monkeypatch.setattr(group, "_build_references", Mock(return_value=[]))
     await group._run_turn()
     planner.assert_awaited_once()
     assert [message.processed_plain_text for message in planner.await_args.args[0]] == ["2", "3", "4", "5", "6"]
@@ -858,7 +858,7 @@ async def test_real_chat_services_share_one_planner_without_starting_individual_
             return _response()
 
         group._service.chat_loop_step = planner
-        group._build_references = AsyncMock(return_value=[])
+        group._build_references = Mock(return_value=[])
         group._emit_response = AsyncMock()
         # Provider 发现不影响此处验证，避免测试查询外部插件/MCP 服务。
         group.tools.refresh = AsyncMock()

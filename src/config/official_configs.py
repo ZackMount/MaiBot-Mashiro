@@ -1331,7 +1331,7 @@ class AMemorixIntegrationConfig(ConfigBase):
     person_profile_injection_max_profiles: int = Field(
         default=3,
         ge=1,
-        le=5,
+        le=10,
         json_schema_extra={
             "label": {
                 "zh_CN": "注入画像上限",

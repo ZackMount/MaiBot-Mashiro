@@ -34,6 +34,7 @@ def process_chat_history_after_cycle(
     max_context_size: int,
     pending_call_ids: set[str] | None = None,
     consume_references: bool = True,
+    trim_context: bool = True,
 ) -> HistoryPostProcessResult:
     """在每轮结束后统一执行历史裁切与清理。"""
 
@@ -52,7 +53,7 @@ def process_chat_history_after_cycle(
 
     compact_removed_count = 0
     removed_messages: list[LLMContextMessage] = []
-    if remaining_context_count >= max_context_size:
+    if trim_context and remaining_context_count >= max_context_size:
         target_context_count = max(MIN_RETAINED_CHAT_MESSAGES, int(max_context_size * TRIM_TARGET_RATIO))
         removed_messages = _trim_history_to_context_target(
             processed_history,

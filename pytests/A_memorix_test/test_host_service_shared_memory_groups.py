@@ -139,6 +139,27 @@ async def test_host_service_passes_shared_memory_session_ids(monkeypatch: pytest
 
 
 @pytest.mark.asyncio
+async def test_explicit_cross_group_shares_groups_but_not_private(monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+    from src.chat.message_receive.chat_manager import chat_manager
+
+    fake_kernel = _FakeKernel()
+    service = _ready_service(fake_kernel)
+    monkeypatch.setattr(service, 'is_enabled', lambda: True)
+    monkeypatch.setattr(service, '_read_config', lambda: {'global_memory_sharing_enabled': False})
+    monkeypatch.setattr('src.A_memorix.host_service.AMemorixConfigUtils.get_shared_memory_session_ids', lambda chat_id: {chat_id})
+    group_a = SimpleNamespace(session_id='group-a', is_group_session=True)
+    group_b = SimpleNamespace(session_id='group-b', is_group_session=True)
+    private = SimpleNamespace(session_id='private', is_group_session=False)
+    monkeypatch.setattr(chat_manager, 'sessions', {'group-a': group_a, 'group-b': group_b, 'private': private})
+    monkeypatch.setattr(chat_manager, 'get_existing_session_by_session_id', lambda sid: chat_manager.sessions.get(sid))
+    await service.invoke('search_memory', {'query': '共同经历', 'chat_id': 'group-a', 'group_id': '10', 'cross_group': True})
+    assert set(fake_kernel.requests[-1].shared_chat_ids) == {'group-a', 'group-b'}
+    await service.invoke('search_memory', {'query': '共同经历', 'chat_id': 'group-a', 'group_id': '10'})
+    assert set(fake_kernel.requests[-1].shared_chat_ids) == {'group-a'}
+
+
+@pytest.mark.asyncio
 async def test_host_service_global_memory_sharing_uses_global_search_scope(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

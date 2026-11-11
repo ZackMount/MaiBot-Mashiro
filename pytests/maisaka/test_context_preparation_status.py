@@ -1,45 +1,58 @@
+from datetime import datetime
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import asyncio
 
 import pytest
 
+from src.chat.heart_flow.heartFC_utils import CycleDetail
 from src.maisaka import reasoning_engine
+from src.maisaka.context.compaction import ContextSummaryMessage
+from src.maisaka.context.post_processor import HistoryPostProcessResult
 
 
 @pytest.mark.asyncio
-async def test_context_status_tracks_parallel_injections(monkeypatch: pytest.MonkeyPatch) -> None:
-    statuses = []
-    logs = []
-    started = asyncio.Event()
-    release_profile = asyncio.Event()
+async def test_compaction_does_not_hold_next_round_or_replace_new_messages(monkeypatch: pytest.MonkeyPatch) -> None:
+    release_summary = asyncio.Event()
+    old = SimpleNamespace(count_in_context=True)
+    recent = object()
+    incoming = object()
+    summary = ContextSummaryMessage(content="状态摘要", timestamp=datetime.now())
 
-    async def memory(**kwargs):
-        return "记忆"
+    async def build(removed, **kwargs):
+        assert removed == [old]
+        await release_summary.wait()
+        return summary
 
-    async def profile(**kwargs):
-        started.set()
-        await release_profile.wait()
-        return ["画像"]
+    def trim(history, *, trim_context, **kwargs):
+        if trim_context:
+            return HistoryPostProcessResult([recent], [old], 1, 1, 1)
+        return HistoryPostProcessResult(history, [], 0, 0, len(history))
 
-    async def image(**kwargs):
-        return "图片"
-
-    monkeypatch.setattr(reasoning_engine.heuristic_memory_injector, "build_injection_message", memory)
-    monkeypatch.setattr(reasoning_engine.image_memory_injector, "build_injection_message", image)
-    monkeypatch.setattr(reasoning_engine, "build_person_profile_injection_messages", profile)
-    monkeypatch.setattr(reasoning_engine.logger, "info", logs.append)
-    engine = object.__new__(reasoning_engine.MaisakaReasoningEngine)
-    engine._runtime = SimpleNamespace(
-        session_id="session", log_prefix="[测试]", _update_stage_status=lambda *args, **kwargs: statuses.append(args)
+    monkeypatch.setattr(reasoning_engine, "build_context_summary", build)
+    monkeypatch.setattr(reasoning_engine, "process_chat_history_after_cycle", trim)
+    monkeypatch.setattr(reasoning_engine, "emit_flow_step", AsyncMock())
+    runtime = SimpleNamespace(
+        session_id="session", log_prefix="[测试]", _chat_history=[old, recent], _max_context_size=2,
+        _chat_loop_service=SimpleNamespace(planner_request_snapshot=object()), _monitor_run_id="run",
+        _get_pending_wait_tool_call_ids=set, _log_history_trimmed=lambda *_: None,
+        _trigger_trimmed_history_learning=AsyncMock(),
     )
+    engine = reasoning_engine.MaisakaReasoningEngine(runtime)
 
-    task = asyncio.create_task(engine._build_planner_injected_user_messages(
-        profile_message=None, source_messages=[], deferred_tools_reminder="", round_text="第 1 轮"
-    ))
-    await asyncio.wait_for(started.wait(), timeout=1)
-    await asyncio.sleep(0)
-    assert statuses[-1] == ("组织上下文", "正在等待：人物画像")
-    release_profile.set()
-    assert await task == ["记忆", "画像", "图片"]
-    assert all(any(name in entry for entry in logs) for name in ("启发式记忆", "人物画像", "图片记忆"))
+    try:
+        await asyncio.wait_for(engine._post_process_chat_history_after_cycle(CycleDetail(cycle_id=1)), timeout=1)
+        task = engine._context_summary_task
+        assert task is not None and not task.done()
+        runtime._chat_history.append(incoming)
+        runtime._chat_loop_service.planner_request_snapshot = object()
+        await engine._post_process_chat_history_after_cycle(CycleDetail(cycle_id=2))
+        assert engine._context_summary_task is task
+        assert runtime._chat_history == [recent, incoming]
+        release_summary.set()
+        await asyncio.wait_for(task, timeout=1)
+        engine._apply_finished_context_summary()
+        assert runtime._chat_history == [summary, recent, incoming]
+    finally:
+        await engine.cancel_background_context_tasks()

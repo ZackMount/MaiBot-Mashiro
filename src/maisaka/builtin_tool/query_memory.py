@@ -48,10 +48,15 @@ def get_tool_spec(*, enabled: bool = True) -> ToolSpec:
                     "enum": sorted(_ALLOWED_QUERY_MODES),
                     "default": "search",
                 },
+                "scope": {
+                    "type": "string", "enum": ["current", "groups"], "default": "current",
+                    "description": "默认 current 只查当前聊天。仅当用户明确要求查其他群、或主动提及其他群经历时，用 groups 检索群聊；不要因自己联想而跨群查询。",
+                },
                 "person_name": {
                     "type": "string",
                     "description": "人物名；用于定向过滤。",
                 },
+                "person_id": {"type": "string", "description": "已知的内部人物 ID；通常使用 person_name。"},
                 "time_start": {
                     "type": "string",
                     "description": "起始时间，仅接受YYYY/MM/DD或YYYY/MM/DD HH:mm。",
@@ -202,6 +207,10 @@ async def handle_tool(
             f"不支持的检索模式：{mode}。可选值：search/time/hybrid/episode/aggregate。",
         )
 
+    scope = str(invocation.arguments.get("scope") or "current").strip().lower() or "current"
+    if scope not in {"current", "groups"}:
+        return tool_ctx.build_failure_result(invocation.tool_name, "记忆范围必须是 current 或 groups。")
+
     default_limit = max(1, global_config.a_memorix.integration.memory_query_default_limit)
     try:
         limit = int(invocation.arguments.get("limit", default_limit) or default_limit)
@@ -221,13 +230,15 @@ async def handle_tool(
     platform = str(chat_stream.platform or "").strip()
     user_id = str(chat_stream.user_id or "").strip()
     group_id = str(chat_stream.group_id or "").strip()
+    if scope == "groups" and not group_id:
+        return tool_ctx.build_failure_result(invocation.tool_name, "跨群记忆检索仅适用于群聊。")
     try:
-        person_id, person_name = await _resolve_person_id(
-            person_name=str(invocation.arguments.get("person_name") or ""),
-            platform=platform,
-            user_id=user_id,
-            group_id=group_id,
-        )
+        person_id = str(invocation.arguments.get("person_id") or "").strip()
+        person_name = str(invocation.arguments.get("person_name") or "").strip()
+        if not person_id:
+            person_id, person_name = await _resolve_person_id(
+                person_name=person_name, platform=platform, user_id=user_id, group_id=group_id,
+            )
     except RuntimeError as exc:
         return tool_ctx.build_failure_result(invocation.tool_name, str(exc))
     if person_name and not person_id:
@@ -258,6 +269,7 @@ async def handle_tool(
             respect_filter=respect_filter,
             user_id=user_id,
             group_id=group_id,
+            cross_group=scope == "groups",
         )
     except Exception as exc:
         logger.exception(f"{runtime.log_prefix} 长期记忆检索执行异常: {exc}")
@@ -289,6 +301,7 @@ async def handle_tool(
                 respect_filter=respect_filter,
                 user_id=user_id,
                 group_id=group_id,
+                cross_group=scope == "groups",
             )
             if fallback_result.success:
                 result = fallback_result
@@ -302,6 +315,7 @@ async def handle_tool(
         {
             "query": clean_query,
             "mode": mode,
+            "scope": scope,
             "effective_mode": effective_mode,
             "limit": limit,
             "chat_id": session_id,
