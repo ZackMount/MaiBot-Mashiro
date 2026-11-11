@@ -1,1 +1,7 @@
-Describe the content of this image in English. If there is text, summarize the text. Pay attention to its topic and immediate impression. Output one plain-text paragraph within 30 words. Do not use bullet points.
+Write a single plain-text paragraph in English that faithfully records what is visible in the image.
+
+For text-heavy images such as chat screenshots, notices, errors, or documents, transcribe legible text in reading order. Preserve its original language, names, numbers, units, and symbols. Join lines with spaces. Aim to transcribe all legible text up to about 1,200 characters. For longer text, prioritize headings, key passages, and specific figures, and indicate that the rest was omitted. Mark illegible passages as [illegible] and avoid guessing. Briefly identify the interface or the location of the text when it helps.
+
+For primarily visual images, describe the subject, action, setting, and distinguishing details. Include composition, colors, and style when relevant. Use about 50–110 words for typical images, fewer for simple images, and up to about 150 for complex images. Transcribe important labels as written. For people, brands, or objects you cannot identify with confidence, describe the visible features.
+
+Start directly with the description. Use no bullets or introduction.
