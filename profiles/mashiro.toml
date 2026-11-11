@@ -2,8 +2,9 @@
 # Merge these sections into your existing configuration; keep credentials and accounts local.
 # Expression rules shown here apply to groups. Preserve any more-specific rules you maintain.
 
-[debug]
-replyer_retro_prompt = false
+[chat]
+creative_mode = false
+reply_cache = false
 
 [visual]
 max_image_num = 10

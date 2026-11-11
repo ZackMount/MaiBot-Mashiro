@@ -1,6 +1,6 @@
 # MaiBot Mashiro
 
-This fork maintains a small set of conversation-quality fixes on top of MaiBot. The `mashiro` branch now includes upstream `main` through `c6429547` (1.3.19). Its initial base was tag `1.3.3` (`cb692c92`). The upstream license and attribution are retained.
+This fork maintains a small set of conversation-quality fixes on top of MaiBot. The `mashiro` branch now includes upstream `main` through `03347c9b` (1.4.3). Its initial base was tag `1.3.3` (`cb692c92`). The upstream license and attribution are retained.
 
 ## Branches and updates
 
@@ -14,7 +14,7 @@ The server's current local settings are separate from the source repository. API
 ## Maintained changes
 
 1. Outgoing quote previews preserve the original author and the boundary between quoted text and the new message. Incoming quote attribution uses upstream's verified-author, session-scoped lookup implementation.
-2. The normal Replyer path uses actual chat records, preserves self-message metadata, and receives original images up to the configured limit. Full Planner analysis is kept for diagnostics instead of becoming the Replyer's script. Use `debug.replyer_retro_prompt = false`.
+2. The normal Replyer path uses actual chat records, preserves self-message metadata, and receives original images up to the configured limit. Full Planner analysis is kept for diagnostics instead of becoming the Replyer's script. The example profile uses `chat.creative_mode = false` and `chat.reply_cache = false`.
 3. Planner tool instructions and Replyer prose instructions are separated. Necessary facts can still be provided through `reply_reference`.
 4. Full timestamps and the actual triggering message, with the gap from the preceding chat message, identify the current turn. Old topics remain available as context and can be explicitly resumed. This is contextual guidance, not a fixed age-based ban on replies.
 5. Responses function definitions explicitly set `strict = false` to preserve optional attachment arguments.

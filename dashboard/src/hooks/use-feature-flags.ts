@@ -1,23 +1,20 @@
 import { useSyncExternalStore } from 'react'
+import { useBotAvailable } from '@/host/state'
 
 import { BOT_CONFIG_UPDATED_EVENT, getBotConfigCached } from '@/lib/config-api'
 
 export interface FeatureFlags {
   agent: boolean
-  computer: boolean
   files: boolean
 }
 
 function resolveFeatureFlags(config: Record<string, unknown> | null): FeatureFlags {
   const agent = config?.agent
-  const computer = config?.computer
   const capabilities = config?.capabilities
 
   return {
     agent: agent !== null && typeof agent === 'object'
       && (agent as Record<string, unknown>).enabled === true,
-    computer: computer !== null && typeof computer === 'object'
-      && (computer as Record<string, unknown>).enabled === true,
     files: capabilities !== null && typeof capabilities === 'object'
       && (capabilities as Record<string, unknown>).files === true,
   }
@@ -72,7 +69,9 @@ function subscribe(listener: () => void) {
 
 const getSnapshot = () => state
 const getServerSnapshot = () => initialState
+const subscribeDisabled = () => () => {}
 
 export function useFeatureFlags() {
-  return useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot)
+  const available = useBotAvailable()
+  return useSyncExternalStore(available ? subscribe : subscribeDisabled, available ? getSnapshot : getServerSnapshot, getServerSnapshot)
 }

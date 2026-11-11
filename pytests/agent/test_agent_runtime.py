@@ -25,9 +25,7 @@ def service(tmp_path, monkeypatch):
         agent=config, bot=SimpleNamespace(nickname="TestMai"),
         personality=SimpleNamespace(personality="你是测试猫娘"),
     ))
-    computer = SimpleNamespace(config=SimpleNamespace(enabled=False), activity={},
-                               bridge=SimpleNamespace(last_frame=None), status=lambda: {"enabled": False})
-    return AgentService(tmp_path, computer=computer)
+    return AgentService(tmp_path)
 
 
 class RespondingConnection:
@@ -171,7 +169,7 @@ def test_animated_reference_is_preserved_but_acp_preview_is_png(service):
 
 
 @pytest.mark.parametrize("locale", ["zh-CN", "en-US", "ja-JP"])
-def test_policy_separates_partner_identity_and_optional_computer(service, monkeypatch, locale):
+def test_policy_preserves_partner_identity(service, monkeypatch, locale):
     monkeypatch.setattr("src.common.prompt_i18n.get_locale", lambda: locale)
     policy = service.policy()
     assert '"nickname": "TestMai"' in policy
@@ -181,11 +179,6 @@ def test_policy_separates_partner_identity_and_optional_computer(service, monkey
     assert "computer_*" not in policy
     assert "C:\\MaiWorkspace" not in policy
 
-    service.computer.config.enabled = True
-    policy = service.policy()
-    assert "Windows Sandbox" in policy
-    assert "computer_*" in policy
-    assert "C:\\MaiWorkspace" in policy
 
 
 def test_output_is_persisted_without_relay_and_policy_is_refreshed(service, monkeypatch):
@@ -209,7 +202,7 @@ def test_output_is_persisted_without_relay_and_policy_is_refreshed(service, monk
         await agent.run_turn()
         assert service.policy() not in [part["text"] for part in connection.prompts[1]["prompt"]]
 
-        service.computer.config.enabled = True
+        service_module.global_config.personality.personality = "更新后的测试人格"
         await agent.enqueue("third")
         await agent.run_turn()
         assert connection.prompts[2]["prompt"][0]["text"] == service.policy()

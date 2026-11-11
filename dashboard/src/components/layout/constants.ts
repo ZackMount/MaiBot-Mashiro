@@ -7,7 +7,6 @@ import {
   Home,
   MessageCircle,
   MessageSquare,
-  Monitor,
   Puzzle,
   Settings,
   Store,
@@ -40,8 +39,12 @@ export const menuSections: MenuSection[] = [
         path: '/',
         searchDescription: 'search.items.homeDesc',
       },
-      { icon: LocalChatIcon, label: 'workspace.chat', path: '/chat' },
-      { icon: Monitor, label: 'chat.computerDesktop', path: '/computer', featureFlag: 'computer' },
+      {
+        icon: LocalChatIcon,
+        label: 'workspace.chat',
+        path: '/chat',
+        searchDescription: 'search.items.chatDesc',
+      },
     ],
   },
   {

@@ -494,7 +494,7 @@ async def test_host_service_queue_append_survives_previous_killed_partial_line(
             service.is_enabled = lambda: True
             service._read_config = lambda: {"storage": {"data_dir": sys.argv[1]}}
 
-            async def partial_append(path, payload):
+            def partial_append(path, payload):
                 path = Path(path)
                 path.parent.mkdir(parents=True, exist_ok=True)
                 with path.open("a", encoding="utf-8") as handle:
@@ -503,7 +503,7 @@ async def test_host_service_queue_append_survives_previous_killed_partial_line(
                 Path(sys.argv[2]).write_text("partial", encoding="utf-8")
                 time.sleep(60)
 
-            service._append_jsonl = partial_append
+            service._append_jsonl_sync = partial_append
             await service.invoke(
                 "ingest_text",
                 {

@@ -64,7 +64,7 @@ def synthetic_settings(monkeypatch):
     monkeypatch.setattr(global_config.bot, "nickname", "真白")
     monkeypatch.setattr(global_config.bot, "qq_account", "10000")
     monkeypatch.setattr(global_config.bot, "alias_names", [])
-    monkeypatch.setattr(global_config.debug, "replyer_retro_prompt", False)
+    monkeypatch.setattr(global_config.chat, "creative_mode", False)
     monkeypatch.setattr(global_config.visual, "max_image_num", 10)
     monkeypatch.setattr(global_config.personality, "personality", "温和随和的群友。")
     monkeypatch.setattr(global_config.personality, "multiple_reply_style", [])
@@ -84,7 +84,7 @@ def generator(monkeypatch):
     obj.chat_stream = SimpleNamespace(session_id="offline-only", is_group_session=True)
     obj._load_prompt = load_prompt
     monkeypatch.setattr(
-        obj, "_build_group_chat_attention_block", lambda session_id: global_config.chat.reply_style.group_chat_prompt
+        obj, "_build_chat_attention_block", lambda session_id: global_config.chat.reply_style.group_chat_prompt
     )
     monkeypatch.setattr(obj, "_build_keyword_reaction_prompt", lambda **kwargs: "")
     return obj
@@ -176,7 +176,7 @@ def test_reply_context_omits_planner_speech_and_preserves_own_quote_metadata(gen
     assert "大家不要挂科哈" not in text
     assert 'is_self_message="true"' in text and 'quote="original"' in text
     assert "2026-11-01 22:44:00" in text
-    assert "【回复信息参考】\n甲正在调侃名字缩写。" in text
+    assert "甲正在调侃名字缩写。" in text.split("【回复信息参考】", 1)[1]
 
 
 def test_reply_target_keeps_quote_and_own_body_distinct(generator):

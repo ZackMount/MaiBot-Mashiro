@@ -9,6 +9,7 @@ import json
 from src.common.data_models.llm_service_data_models import LLMResponseResult
 from src.agent.planner import ACPPlannerSnapshot, generate_planner_response
 from src.common.data_models.message_component_data_model import ReplyComponent
+from src.common.llm_json import validate_llm_json
 from src.common.logger import get_logger
 from src.common.prompt_i18n import load_prompt
 from src.config.config import global_config
@@ -220,10 +221,11 @@ async def build_context_summary(
     previous_summary: ContextSummaryMessage | None,
     recent_messages: Sequence[LLMContextMessage],
     session_id: str,
-    max_summary_chars: int,
+    max_summary_chars: int | None = None,
     source_context: str = "",
 ) -> ContextSummaryMessage:
     """保留 Planner 的完整请求前缀，仅追加未覆盖资料和压缩指令。"""
+    max_summary_chars = max_summary_chars or global_config.chat.context_compaction_summary_max_chars
     request = await asyncio.to_thread(
         _build_compaction_request, removed_messages, planner_snapshot=planner_snapshot,
         previous_summary=previous_summary, recent_messages=recent_messages,
@@ -244,7 +246,7 @@ async def build_context_summary(
         logger.exception("上下文压缩请求记录保存失败")
     if result.tool_calls or result.native_tool_calls:
         raise ValueError("压缩响应包含被禁止的工具调用，拒绝提交摘要")
-    rendered = ConversationState.model_validate_json(result.response).render()
+    rendered = validate_llm_json(result.response, ConversationState).render()
     if not rendered or len(rendered) > max_summary_chars:
         raise ValueError(f"状态摘要为空或超过字符预算: {len(rendered)}/{max_summary_chars}")
     logger.info(

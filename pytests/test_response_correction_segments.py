@@ -1,7 +1,6 @@
 """纠错消息在回复压缩后仍独立发送。"""
 
 from types import SimpleNamespace
-from typing import Any, Tuple
 
 import pytest
 
@@ -15,12 +14,15 @@ from src.chat.utils.utils import ProcessedResponseSegment, _merge_processed_segm
 async def test_correction_stays_separate_through_post_processing(monkeypatch, mode: str, quote: bool) -> None:
     sentences = [(text, "。") for text in ["今天先休息吧", "我也准备睡了", "明天见", "到时候一起吃饭呀"]]
 
-    class TypoGenerator:
-        def __init__(self, **_kwargs: Any) -> None:
-            pass
-
-        def create_typo_sentence(self, sentence: str) -> Tuple[str, str]:
-            return ("明天件", "见") if sentence == "明天见" else (sentence, "")
+    async def apply_correction(segments):
+        corrected = []
+        for segment in segments:
+            if segment.text == "明天见":
+                corrected.append(ProcessedResponseSegment("明天件", separator=segment.separator))
+                corrected.append(ProcessedResponseSegment("见", quote_previous=quote, is_correction=True))
+            else:
+                corrected.append(segment)
+        return corrected
 
     async def split_with_llm(_text: str):
         return sentences
@@ -38,23 +40,16 @@ async def test_correction_stays_separate_through_post_processing(monkeypatch, mo
                 max_sentence_num=9,
                 max_split_num=3,
             ),
-            chinese_typo=SimpleNamespace(
-                enable=True,
-                enable_correction_quote=quote,
-                correction_quote_probability=1.0,
-                error_rate=0.01,
-                min_freq=9,
-                tone_error_rate=0.1,
-                word_replace_rate=0.006,
-            ),
         ),
     )
-    monkeypatch.setattr(utils, "ChineseTypoGenerator", TypoGenerator)
     monkeypatch.setattr(utils.random, "random", lambda: 0.0)
     monkeypatch.setattr(utils, "_split_into_sentence_segments", lambda _text: sentences)
     monkeypatch.setattr(utils, "split_text_with_llm", split_with_llm)
 
-    result = await utils.process_llm_response_segments_async("今天先休息吧。我也准备睡了。明天见。到时候一起吃饭呀" * 4)
+    result = await utils.process_llm_response_segments_async(
+        "今天先休息吧。我也准备睡了。明天见。到时候一起吃饭呀" * 4,
+        transform_segments=apply_correction,
+    )
 
     assert [segment.text for segment in result] == [
         "今天先休息吧。我也准备睡了。明天件",
