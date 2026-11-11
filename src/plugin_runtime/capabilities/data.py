@@ -705,9 +705,18 @@ class RuntimeDataCapabilityMixin:
             return {"success": False, "error": str(e)}
 
     async def _cap_emoji_get_all(self, plugin_id: str, capability: str, args: Dict[str, Any]) -> Any:
+        """获取已注册表情包。选择器可只请求描述和哈希，避免读取图片。"""
         try:
             from src.emoji_system.emoji_manager import emoji_manager
 
+            if args.get("include_binary_data") is False:
+                return {
+                    "success": True,
+                    "emojis": [
+                        {"emoji_hash": emoji.file_hash, "description": emoji.description}
+                        for emoji in emoji_manager.emojis
+                    ],
+                }
             emojis = []
             for emoji in emoji_manager.emojis:
                 serialized = self._serialize_emoji_payload(emoji)

@@ -470,7 +470,7 @@ class RuntimeCoreCapabilityMixin:
             return self._build_send_result(args, error=str(exc))
 
     async def _cap_send_emoji(self, plugin_id: str, capability: str, args: Dict[str, Any]) -> Any:
-        """向指定流发送表情图片。
+        """向指定流发送表情图片，可用 Base64 或已注册表情的哈希。
 
         Args:
             plugin_id: 插件标识。
@@ -484,13 +484,27 @@ class RuntimeCoreCapabilityMixin:
         from src.services import send_service as send_api
 
         emoji_base64 = str(args.get("emoji_base64", ""))
+        emoji_hash = str(args.get("emoji_hash") or "").strip()
         stream_id = str(args.get("stream_id", ""))
         sync_to_maisaka_history = bool(args.get("sync_to_maisaka_history", False))
         maisaka_source_kind = str(args.get("maisaka_source_kind", "plugin_send") or "plugin_send")
-        if not emoji_base64 or not stream_id:
-            return self._build_send_result(args, error="缺少必要参数 emoji_base64 或 stream_id")
+        if not stream_id or not (emoji_base64 or emoji_hash):
+            return self._build_send_result(args, error="请提供 stream_id 以及 emoji_base64 或 emoji_hash")
 
         try:
+            if not emoji_base64:
+                from src.common.utils.image_path import resolve_stored_image_path
+                from src.common.utils.utils_image import ImageUtils
+                from src.emoji_system.emoji_manager import emoji_manager
+
+                emoji = emoji_manager.get_emoji_by_hash(emoji_hash)
+                if emoji is None:
+                    return self._build_send_result(args, error="选中的表情包已不在可用库中")
+                emoji_base64 = await asyncio.to_thread(
+                    ImageUtils.image_path_to_base64, str(resolve_stored_image_path(emoji.full_path))
+                )
+                if not emoji_base64:
+                    return self._build_send_result(args, error="读取选中的表情包图片失败")
             sent_message = await send_api.emoji_to_stream_with_message(
                 emoji_base64=emoji_base64,
                 stream_id=stream_id,
